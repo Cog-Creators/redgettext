@@ -376,14 +376,9 @@ class TokenEater:
             entry = (self.__curfile, lineno)
             self.__messages.setdefault(msg, {})[entry] = isdocstring
 
-    @property
-    def filename(self):
-        return self.__curfile
-
-    @filename.setter
-    def filename(self, filename):
+    def set_filename(self, filename):
         self.__curfile = filename
-        self.__freshmodule = True
+        self.__freshmodule = 1
 
     def write(self, fp):
         options = self.__options
