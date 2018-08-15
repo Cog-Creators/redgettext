@@ -1,4 +1,5 @@
 from setuptools import setup
+from redgettext import __version__
 
 with open("README.rst") as file:
     readme = file.read()
@@ -9,7 +10,7 @@ setup(
     description="A slightly modified pygettext for Red-DiscordBot",
     long_description=readme,
     url="https://github.com/Tobotimus/redgettext",
-    version="1.0",
+    version=__version__,
     license="GPL-3.0",
     install_requires=[],
     py_modules=["redgettext"],
