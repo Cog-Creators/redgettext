@@ -199,6 +199,10 @@ def escape_nonascii(s, encoding):
     return ''.join(escapes[b] for b in s.encode(encoding))
 
 
+def is_literal_string(s):
+    return s[0] in '\'"' or (s[0] in 'rRuU' and s[1] in '\'"')
+
+
 def safe_eval(s):
     # unwrap quotes, safely
     return eval(s, {'__builtins__': {}}, {})
@@ -226,24 +230,6 @@ def containsAny(str, set):
     return 1 in [c in str for c in set]
 
 
-def _visit_pyfiles(list, dirname, names):
-    """Helper for getFilesForName()."""
-    # get extension for python source files
-    if '_py_ext' not in globals():
-        global _py_ext
-        _py_ext = importlib.machinery.SOURCE_SUFFIXES[0]
-
-    # don't recurse into CVS directories
-    if 'CVS' in names:
-        names.remove('CVS')
-
-    # add all *.py files to list
-    list.extend(
-        [os.path.join(dirname, file) for file in names
-         if os.path.splitext(file)[1] == _py_ext]
-    )
-
-
 def getFilesForName(name):
     """Get a list of module files for a filename, a module or package name,
     or a directory.
@@ -269,7 +255,17 @@ def getFilesForName(name):
     if os.path.isdir(name):
         # find all python files in directory
         list = []
-        os.walk(name, _visit_pyfiles, list)
+        # get extension for python source files
+        _py_ext = importlib.machinery.SOURCE_SUFFIXES[0]
+        for root, dirs, files in os.walk(name):
+            # don't recurse into CVS directories
+            if 'CVS' in dirs:
+                dirs.remove('CVS')
+            # add all *.py files to list
+            list.extend(
+                [os.path.join(root, file) for file in files
+                 if os.path.splitext(file)[1] == _py_ext]
+                )
         return list
     elif os.path.exists(name):
         # a single file
@@ -298,7 +294,7 @@ class TokenEater:
         if opts.docstrings and not opts.nodocstrings.get(self.__curfile):
             # module docstring?
             if self.__freshmodule:
-                if ttype == tokenize.STRING:
+                if ttype == tokenize.STRING and is_literal_string(tstring):
                     self.__addentry(safe_eval(tstring), lineno, isdocstring=1)
                     self.__freshmodule = 0
                 elif ttype not in (tokenize.COMMENT, tokenize.NL):
@@ -330,7 +326,7 @@ class TokenEater:
 
     def __suitedocstring(self, ttype, tstring, lineno):
         # ignore any intervening noise
-        if ttype == tokenize.STRING:
+        if ttype == tokenize.STRING and is_literal_string(tstring):
             self.__addentry(safe_eval(tstring), lineno, isdocstring=1)
             self.__state = self.__waiting
         elif ttype not in (tokenize.NEWLINE, tokenize.INDENT,
@@ -355,7 +351,7 @@ class TokenEater:
             if self.__data:
                 self.__addentry(EMPTYSTRING.join(self.__data))
             self.__state = self.__waiting
-        elif ttype == tokenize.STRING:
+        elif ttype == tokenize.STRING and is_literal_string(tstring):
             self.__data.append(safe_eval(tstring))
         elif ttype not in [tokenize.COMMENT, token.INDENT, token.DEDENT,
                            token.NEWLINE, tokenize.NL]:
