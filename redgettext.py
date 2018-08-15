@@ -2,7 +2,7 @@
 # -*- coding: iso-8859-1 -*-
 # redgettext was originally forked from version 1.5 of pygettext,
 # taken directly from Python Release 3.6.5, by Toby Harradine
-# <tobotimus@gmail.com>
+# <tobyharradine@gmail.com>
 #
 # pygettext was originally written by Barry Warsaw <barry@python.org>
 #
@@ -20,130 +20,22 @@
 # 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017 Python Software
 # Foundation; All Rights Reserved
 
-# for selftesting
-try:
-    import fintl
-
-    _ = fintl.gettext
-except ImportError:
-    _ = lambda s: s
-
-__doc__ = _("""redgettext -- Red equivalent of pygettext
-
-Usage: redgettext [options] inputfile ...
-
-Options:
-
-    -a
-    --extract-all
-        Extract all strings.
-
-    -d name
-    --default-domain=name
-        Rename the default output file from messages.pot to name.pot.
-
-    -E
-    --escape
-        Replace non-ASCII characters with octal escape sequences.
-
-    -D
-    --docstrings
-        Extract command and/or cog docstrings.  These do not need to
-        be wrapped in _() markers, and in fact cannot be for Python to
-        consider them docstrings. (See also the -X option).
-
-    -h
-    --help
-        Print this help message and exit.
-
-    -k word
-    --keyword=word
-        Keywords to look for in addition to the default set, which are:
-        %(DEFAULTKEYWORDS)s
-
-        You can have multiple -k flags on the command line.
-
-    -K
-    --no-default-keywords
-        Disable the default set of keywords (see above).  Any keywords
-        explicitly added with the -k/--keyword option are still recognized.
-
-    --no-location
-        Do not write filename/lineno location comments.
-
-    -n
-    --add-location
-        Write filename/lineno location comments indicating where each
-        extracted string is found in the source.  These lines appear before
-        each msgid.  The style of comments is controlled by the -S/--style
-        option.  This is the default.
-
-    -o filename
-    --output=filename
-        Rename the default output file from messages.pot to filename.  If
-        filename is `-' then the output is sent to standard out.
-
-    -p dir
-    --output-dir=dir
-        Output files will be placed in directory dir.
-
-    -S stylename
-    --style stylename
-        Specify which style to use for location comments.  Two styles are
-        supported:
-
-        Solaris  # File: filename, line: line-number
-        GNU      #: filename:line
-
-        The style name is case insensitive.  GNU style is the default.
-
-    -v
-    --verbose
-        Print the names of the files being processed.
-
-    -V
-    --version
-        Print the version of redgettext and exit.
-
-    -w columns
-    --width=columns
-        Set width of output to columns.
-
-    -x filename
-    --exclude-file=filename
-        Specify a file that contains a list of strings that are not be
-        extracted from the input files.  Each string to be excluded must
-        appear on a line by itself in the file.
-
-    -X filename
-    --no-docstrings=filename
-        Specify a file that contains a list of files (one per line) that
-        should not have their docstrings extracted.  This is only useful in
-        conjunction with the -D option above.
-
-If `inputfile' is -, standard input is read.
-""")
-
-import os
-import importlib.machinery
-import importlib.util
+import argparse
+import bisect
+import pathlib
 import sys
-import glob
 import time
-import getopt
-import token
 import tokenize
+from collections import OrderedDict
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, TextIO, Tuple
 
-__version__ = '1.2'
+__version__ = "2.0"
 
-default_keywords = ['_']
-DEFAULTKEYWORDS = ', '.join(default_keywords)
-
-EMPTYSTRING = ''
+DEFAULT_KEYWORDS = ["_"]
 
 # The normal pot-file header. msgmerge and Emacs's po-mode work better if it's
 # there.
-pot_header = _('''\
+POT_HEADER = """\
 # SOME DESCRIPTIVE TITLE.
 # Copyright (C) YEAR ORGANIZATION
 # FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
@@ -160,448 +52,413 @@ msgstr ""
 "Content-Transfer-Encoding: %(encoding)s\\n"
 "Generated-By: redgettext %(version)s\\n"
 
-''')
+"""
 
 
-def usage(code, msg=''):
-    print(__doc__ % globals(), file=sys.stderr)
-    if msg:
-        print(msg, file=sys.stderr)
-    sys.exit(code)
+ESCAPES = {"\\": r"\\", "\t": r"\t", "\r": r"\r", "\n": r"\n", '"': r"\""}
 
 
-def make_escapes(pass_nonascii):
-    global escapes, escape
-    if pass_nonascii:
-        # Allow non-ascii characters to pass through so that e.g. 'msgid
-        # "Höhe"' would result not result in 'msgid "H\366he"'.  Otherwise we
-        # escape any character outside the 32..126 range.
-        mod = 128
-        escape = escape_ascii
-    else:
-        mod = 256
-        escape = escape_nonascii
-    escapes = [r"\%03o" % i for i in range(mod)]
-    for i in range(32, 127):
-        escapes[i] = chr(i)
-    escapes[ord('\\')] = r'\\'
-    escapes[ord('\t')] = r'\t'
-    escapes[ord('\r')] = r'\r'
-    escapes[ord('\n')] = r'\n'
-    escapes[ord('\"')] = r'\"'
+def escape(s: str) -> str:
+    ret = ""
+    for char in s:
+        if char in ESCAPES:
+            char = ESCAPES[char]
+        ret += char
+    return ret
 
 
-def escape_ascii(s, encoding):
-    return ''.join(escapes[ord(c)] if ord(c) < 128 else c for c in s)
+def is_literal_string(s: str) -> bool:
+    return s[0] in "'\"" or (s[0] in "rRuU" and s[1] in "'\"")
 
 
-def escape_nonascii(s, encoding):
-    return ''.join(escapes[b] for b in s.encode(encoding))
-
-
-def is_literal_string(s):
-    return s[0] in '\'"' or (s[0] in 'rRuU' and s[1] in '\'"')
-
-
-def safe_eval(s):
+def safe_eval(s: str) -> Any:
     # unwrap quotes, safely
-    return eval(s, {'__builtins__': {}}, {})
+    return eval(s, {"__builtins__": {}}, {})
 
 
-def normalize(s, encoding):
+def normalize(s: str) -> str:
     # This converts the various Python string types into a format that is
     # appropriate for .po files, namely much closer to C style.
-    lines = s.split('\n')
+    lines = s.split("\n")
     if len(lines) == 1:
-        s = '"' + escape(s, encoding) + '"'
+        s = '"' + escape(s) + '"'
     else:
         if not lines[-1]:
             del lines[-1]
-            lines[-1] = lines[-1] + '\n'
+            lines[-1] = lines[-1] + "\n"
         for i in range(len(lines)):
-            lines[i] = escape(lines[i], encoding)
-        lineterm = '\\n"\n"'
-        s = '""\n"' + lineterm.join(lines) + '"'
+            lines[i] = escape(lines[i])
+        line_term = '\\n"\n"'
+        s = '""\n"' + line_term.join(lines) + '"'
     return s
 
 
-def containsAny(str, set):
-    """Check whether 'str' contains ANY of the chars in 'set'"""
-    return 1 in [c in str for c in set]
+class _MessageContextEntry(NamedTuple):
+    file: pathlib.Path
+    lineno: int
+    is_docstring: bool
+
+    def __lt__(self, other: Any) -> bool:
+        if not isinstance(other, _MessageContextEntry):
+            raise TypeError(f"Cannot compare with type {type(other)!r}")
+        if self.file == other.file:
+            return self.lineno < other.lineno
+        else:
+            return self.file < other.file
+
+    def __gt__(self, other: Any) -> bool:
+        return not self <= other
 
 
-def _visit_pyfiles(list, dirname, names):
-    """Helper for getFilesForName()."""
-    # get extension for python source files
-    if '_py_ext' not in globals():
-        global _py_ext
-        _py_ext = importlib.machinery.SOURCE_SUFFIXES[0]
-
-    # don't recurse into CVS directories
-    if 'CVS' in names:
-        names.remove('CVS')
-
-    # add all *.py files to list
-    list.extend(
-        [os.path.join(dirname, file) for file in names
-         if os.path.splitext(file)[1] == _py_ext]
-        )
-
-
-def getFilesForName(name):
-    """Get a list of module files for a filename, a module or package name,
-    or a directory.
-    """
-    if not os.path.exists(name):
-        # check for glob chars
-        if containsAny(name, "*?[]"):
-            files = glob.glob(name)
-            list = []
-            for file in files:
-                list.extend(getFilesForName(file))
-            return list
-
-        # try to find module or package
-        try:
-            spec = importlib.util.find_spec(name)
-            name = spec.origin
-        except ImportError:
-            name = None
-        if not name:
-            return []
-
-    if os.path.isdir(name):
-        # find all python files in directory
-        list = []
-        os.walk(name, _visit_pyfiles, list)
-        return list
-    elif os.path.exists(name):
-        # a single file
-        return [name]
-
-    return []
+_MsgIDDict = Dict[str, List[_MessageContextEntry]]
 
 
 class TokenEater:
-    def __init__(self, options):
-        self.__options = options
-        self.__messages = {}
-        self.__state = self.__waiting
-        self.__data = []
-        self.__lineno = -1
-        self.__freshmodule = 1
-        self.__curfile = None
-        self.__enclosurecount = 0
+    def __init__(self, options: argparse.Namespace):
+        self.__options: argparse.Namespace = options
+        self.__messages: Dict[pathlib.Path, _MsgIDDict] = {}
+        self.__state: Callable[[int, str, int], None] = self.__waiting
+        self.__data: List[Any] = []
+        self.__lineno: int = -1
+        self.__fresh_module: bool = True
+        self.__cur_infile: Optional[pathlib.Path] = None
+        self.__cur_outfile: Optional[pathlib.Path] = None
+        self.__enclosure_count: int = 0
 
-    def __call__(self, ttype, tstring, stup, etup, line):
-        self.__state(ttype, tstring, stup[0])
+    def __call__(
+        self,
+        ttype: int,
+        string: str,
+        start: Tuple[int, int],
+        end: Tuple[int, int],
+        line: int,
+    ) -> None:
+        self.__state(ttype, string, start[0])
 
-    def __waiting(self, ttype, tstring, lineno):
+    def __waiting(self, ttype: int, string: str, lineno: int) -> None:
         opts = self.__options
         # Do docstring extractions, if enabled
-        if opts.docstrings and not opts.nodocstrings.get(self.__curfile):
+        if opts.docstrings:
             # module docstring?
-            if self.__freshmodule:
-                if ttype == tokenize.STRING and is_literal_string(tstring):
-                    self.__addentry(safe_eval(tstring), lineno, isdocstring=1)
-                    self.__freshmodule = 0
+            if self.__fresh_module:
+                if ttype == tokenize.STRING and is_literal_string(string):
+                    self.__add_entry(safe_eval(string), lineno, is_docstring=True)
+                    self.__fresh_module = False
                 elif ttype not in (tokenize.COMMENT, tokenize.NL):
-                    self.__freshmodule = 0
-                return
-            # cog or command docstring?
-            if ttype == tokenize.OP and tstring == '@':
-                self.__state = self.__decoratorseen
-                return
-        if ttype == tokenize.NAME and tstring in opts.keywords:
-            self.__state = self.__keywordseen
+                    self.__fresh_module = False
+            # class or method docstring?
+            elif ttype == tokenize.NAME and string in ("class", "def"):
+                self.__state = self.__suite_seen
+        # cog or command docstring?
+        elif opts.cmd_docstrings and ttype == tokenize.OP and string == "@":
+            self.__state = self.__decorator_seen
+        elif ttype == tokenize.NAME and string in opts.keywords:
+            self.__state = self.__keyword_seen
 
-    def __decoratorseen(self, ttype, tstring, lineno):
+    # noinspection PyUnusedLocal
+    def __decorator_seen(self, ttype: int, string: str, lineno: int) -> None:
         # skip over any enclosure pairs until we see the colon
-        if ttype == tokenize.NAME and tstring in ('command', 'group', 'cog_i18n'):
-            self.__state = self.__suiteseen
+        if ttype == tokenize.NAME and string in ("command", "group", "cog_i18n"):
+            self.__state = self.__suite_seen
         elif ttype == tokenize.NEWLINE:
             self.__state = self.__waiting
 
-    def __suiteseen(self, ttype, tstring, lineno):
+    # noinspection PyUnusedLocal
+    def __suite_seen(self, ttype: int, string: str, lineno: int) -> None:
         if ttype == tokenize.OP:
-            if tstring == ':' and self.__enclosurecount == 0:
+            if string == ":" and self.__enclosure_count == 0:
                 # we see a colon and we're not in an enclosure: end of def/class
-                self.__state = self.__suitedocstring
-            elif tstring in '([{':
-                self.__enclosurecount += 1
-            elif tstring in ')]}':
-                self.__enclosurecount -= 1
+                self.__state = self.__suite_docstring
+            elif string in "([{":
+                self.__enclosure_count += 1
+            elif string in ")]}":
+                self.__enclosure_count -= 1
 
-    def __suitedocstring(self, ttype, tstring, lineno):
+    def __suite_docstring(self, ttype: int, string: str, lineno: int) -> None:
         # ignore any intervening noise
-        if ttype == tokenize.STRING and is_literal_string(tstring):
-            self.__addentry(safe_eval(tstring), lineno, isdocstring=1)
+        if ttype == tokenize.STRING and is_literal_string(string):
+            self.__add_entry(safe_eval(string), lineno, is_docstring=True)
             self.__state = self.__waiting
-        elif ttype not in (tokenize.NEWLINE, tokenize.INDENT,
-                           tokenize.COMMENT):
+        elif ttype not in (tokenize.NEWLINE, tokenize.INDENT, tokenize.COMMENT):
             # there was no class docstring
             self.__state = self.__waiting
 
-    def __keywordseen(self, ttype, tstring, lineno):
-        if ttype == tokenize.OP and tstring == '(':
+    def __keyword_seen(self, ttype: int, string: str, lineno: int) -> None:
+        if ttype == tokenize.OP and string == "(":
             self.__data = []
             self.__lineno = lineno
-            self.__state = self.__openseen
+            self.__state = self.__open_seen
         else:
             self.__state = self.__waiting
 
-    def __openseen(self, ttype, tstring, lineno):
-        if ttype == tokenize.OP and tstring == ')':
+    # noinspection PyUnusedLocal
+    def __open_seen(self, ttype: int, string: str, lineno: int) -> None:
+        if ttype == tokenize.OP and string == ")":
             # We've seen the last of the translatable strings.  Record the
             # line number of the first line of the strings and update the list
             # of messages seen.  Reset state for the next batch.  If there
             # were no strings inside _(), then just ignore this entry.
             if self.__data:
-                self.__addentry(EMPTYSTRING.join(self.__data))
+                self.__add_entry("".join(self.__data))
             self.__state = self.__waiting
-        elif ttype == tokenize.STRING and is_literal_string(tstring):
-            self.__data.append(safe_eval(tstring))
-        elif ttype not in [tokenize.COMMENT, token.INDENT, token.DEDENT,
-                           token.NEWLINE, tokenize.NL]:
+        elif ttype == tokenize.STRING and is_literal_string(string):
+            self.__data.append(safe_eval(string))
+        elif ttype not in [
+            tokenize.COMMENT,
+            tokenize.INDENT,
+            tokenize.DEDENT,
+            tokenize.NEWLINE,
+            tokenize.NL,
+        ]:
             # warn if we see anything else than STRING or whitespace
-            print((
-                      '*** %(file)s:%(lineno)s: Seen unexpected token "%(token)s"'
-                  ) % {
-                      'token': tstring,
-                      'file': self.__curfile,
-                      'lineno': self.__lineno
-                  }, file=sys.stderr)
+            print(
+                '*** %(file)s:%(lineno)s: Seen unexpected token "%(token)s"'
+                % {"token": string, "file": self.__cur_infile, "lineno": self.__lineno},
+                file=sys.stderr,
+            )
             self.__state = self.__waiting
 
-    def __addentry(self, msg, lineno=None, isdocstring=0):
+    def __add_entry(
+        self, msg: str, lineno: Optional[int] = None, is_docstring: bool = False
+    ) -> None:
         if lineno is None:
-            lineno = self.__lineno
-        if msg not in self.__options.toexclude:
-            entry = (self.__curfile, lineno)
-            self.__messages.setdefault(msg, {})[entry] = isdocstring
+            lineno: int = self.__lineno
 
-    def set_filename(self, filename):
-        self.__curfile = filename
-        self.__freshmodule = 1
-
-    def write(self, fp):
-        options = self.__options
-        timestamp = time.strftime('%Y-%m-%d %H:%M%z')
-        encoding = fp.encoding if fp.encoding else 'UTF-8'
-        print(pot_header % {'time': timestamp, 'version': __version__,
-                            'charset': encoding,
-                            'encoding': '8bit'}, file=fp)
-        # Sort the entries.  First sort each particular entry's keys, then
-        # sort all the entries by their first item.
-        reverse = {}
-        for k, v in self.__messages.items():
-            keys = sorted(v.keys())
-            reverse.setdefault(tuple(keys), []).append((k, v))
-        rkeys = sorted(reverse.keys())
-        for rkey in rkeys:
-            rentries = reverse[rkey]
-            rentries.sort()
-            for k, v in rentries:
-                # If the entry was gleaned out of a docstring, then add a
-                # comment stating so.  This is to aid translators who may wish
-                # to skip translating some unimportant docstrings.
-                isdocstring = any(v.values())
-                # k is the message string, v is a dictionary-set of (filename,
-                # lineno) tuples.  We want to sort the entries in v first by
-                # file name and then by line number.
-                v = sorted(v.keys())
-                if not options.writelocations:
-                    pass
-                # location comments are different b/w Solaris and GNU:
-                elif options.locationstyle == options.SOLARIS:
-                    for filename, lineno in v:
-                        d = {'filename': filename, 'lineno': lineno}
-                        print((
-                                  '# File: %(filename)s, line: %(lineno)d') % d, file=fp)
-                elif options.locationstyle == options.GNU:
-                    # fit as many locations on one line, as long as the
-                    # resulting line length doesn't exceed 'options.width'
-                    locline = '#:'
-                    for filename, lineno in v:
-                        d = {'filename': filename, 'lineno': lineno}
-                        s = ' %(filename)s:%(lineno)d' % d
-                        if len(locline) + len(s) <= options.width:
-                            locline = locline + s
-                        else:
-                            print(locline, file=fp)
-                            locline = "#:" + s
-                    if len(locline) > 2:
-                        print(locline, file=fp)
-                if isdocstring:
-                    print('#, docstring', file=fp)
-                print('msgid', normalize(k, encoding), file=fp)
-                print('msgstr ""\n', file=fp)
-
-
-def main():
-    global default_keywords
-    try:
-        opts, args = getopt.getopt(
-            sys.argv[1:],
-            'ad:DEhk:Kno:p:S:Vvw:x:X:',
-            ['extract-all', 'default-domain=', 'escape', 'help',
-             'keyword=', 'no-default-keywords',
-             'add-location', 'no-location', 'output=', 'output-dir=',
-             'style=', 'verbose', 'version', 'width=', 'exclude-file=',
-             'docstrings', 'no-docstrings',
-             ])
-    except getopt.error as msg:
-        usage(1, msg)
-
-    # for holding option values
-    class Options:
-        # constants
-        GNU = 1
-        SOLARIS = 2
-        # defaults
-        extractall = 0  # FIXME: currently this option has no effect at all.
-        escape = 0
-        keywords = []
-        outpath = ''
-        outfile = 'messages.pot'
-        writelocations = 1
-        locationstyle = GNU
-        verbose = 0
-        width = 78
-        excludefilename = ''
-        docstrings = 0
-        nodocstrings = {}
-
-    options = Options()
-    locations = {'gnu': options.GNU,
-                 'solaris': options.SOLARIS,
-                 }
-
-    # parse options
-    for opt, arg in opts:
-        if opt in ('-h', '--help'):
-            usage(0)
-        elif opt in ('-a', '--extract-all'):
-            options.extractall = 1
-        elif opt in ('-d', '--default-domain'):
-            options.outfile = arg + '.pot'
-        elif opt in ('-E', '--escape'):
-            options.escape = 1
-        elif opt in ('-D', '--docstrings'):
-            options.docstrings = 1
-        elif opt in ('-k', '--keyword'):
-            options.keywords.append(arg)
-        elif opt in ('-K', '--no-default-keywords'):
-            default_keywords = []
-        elif opt in ('-n', '--add-location'):
-            options.writelocations = 1
-        elif opt in ('--no-location',):
-            options.writelocations = 0
-        elif opt in ('-S', '--style'):
-            options.locationstyle = locations.get(arg.lower())
-            if options.locationstyle is None:
-                usage(1, _('Invalid value for --style: %s') % arg)
-        elif opt in ('-o', '--output'):
-            options.outfile = arg
-        elif opt in ('-p', '--output-dir'):
-            options.outpath = arg
-        elif opt in ('-v', '--verbose'):
-            options.verbose = 1
-        elif opt in ('-V', '--version'):
-            print(_('redgettext (pygettext for Red) %s') % __version__)
-            sys.exit(0)
-        elif opt in ('-w', '--width'):
-            try:
-                options.width = int(arg)
-            except ValueError:
-                usage(1, _('--width argument must be an integer: %s') % arg)
-        elif opt in ('-x', '--exclude-file'):
-            options.excludefilename = arg
-        elif opt in ('-X', '--no-docstrings'):
-            fp = open(arg)
-            try:
-                while 1:
-                    line = fp.readline()
-                    if not line:
-                        break
-                    options.nodocstrings[line[:-1]] = 1
-            finally:
-                fp.close()
-
-    # calculate escapes
-    make_escapes(not options.escape)
-
-    # calculate all keywords
-    options.keywords.extend(default_keywords)
-
-    # initialize list of strings to exclude
-    if options.excludefilename:
-        try:
-            fp = open(options.excludefilename)
-            options.toexclude = fp.readlines()
-            fp.close()
-        except IOError:
-            print(_(
-                "Can't read --exclude-file: %s") % options.excludefilename, file=sys.stderr)
-            sys.exit(1)
-    else:
-        options.toexclude = []
-
-    # resolve args to module lists
-    expanded = []
-    for arg in args:
-        if arg == '-':
-            expanded.append(arg)
+        entry = _MessageContextEntry(self.__cur_infile, lineno, is_docstring)
+        # noinspection PyUnusedLocal
+        msgid_dict: _MsgIDDict
+        if self.__cur_outfile in self.__messages:
+            msgid_dict = self.__messages[self.__cur_outfile]
         else:
-            expanded.extend(getFilesForName(arg))
-    args = expanded
+            self.__messages[self.__cur_outfile] = msgid_dict = {}
+
+        if msg in msgid_dict:
+            bisect.insort(msgid_dict[msg], entry)
+        else:
+            msgid_dict[msg] = [entry]
+
+    def set_cur_file(self, path: pathlib.Path) -> None:
+        opts = self.__options
+        self.__cur_infile = path
+        if opts.relative_to_cwd:
+            cur_dir = pathlib.Path()
+        else:
+            cur_dir = path.parent
+        self.__cur_outfile = cur_dir / opts.output_dir / opts.output_filename
+        self.__fresh_module = True
+
+    def write(self) -> None:
+        time_str = time.strftime("%Y-%m-%d %H:%M%z")
+        for outfile_path, msgid_dict in self.__messages.items():
+            outfile_path.parent.mkdir(parents=True, exist_ok=True)
+            with outfile_path.open("w") as fp:
+                self.__write_outfile(fp, msgid_dict, time_str)
+
+    def __write_outfile(self, fp: TextIO, msgid_dict: _MsgIDDict, time_str: str):
+        opts = self.__options
+        encoding = fp.encoding if fp.encoding else "UTF-8"
+        print(
+            POT_HEADER
+            % {
+                "time": time_str,
+                "version": __version__,
+                "charset": encoding,
+                "encoding": "8bit",
+            },
+            file=fp,
+        )
+
+        # Sort the entries.
+        # The entry lists for each msgid are already sorted,
+        # so we'll just sort by the first entry in each list
+        try:
+            sorted_msgid_items: List[Tuple[str, _MessageContextEntry]] = sorted(
+                msgid_dict.items(), key=lambda tup: tup[1][0]
+            )
+        except TypeError:
+            print(msgid_dict)
+            sys.exit(1)
+        msgid_dict = OrderedDict(sorted_msgid_items)
+        for msgid, entry_list in msgid_dict.items():
+            if opts.include_context:
+                # Add the reference comment.
+                # Fit as many locations on one line, as long as the
+                # resulting line length doesn't exceed 'options.width'.
+                loc_line = "#:"
+                for entry in entry_list:
+                    ref = f" {entry.file}:{entry.lineno}"
+                    if len(loc_line) + len(ref) <= opts.width:
+                        loc_line = loc_line + ref
+                    else:
+                        print(loc_line, file=fp)
+                        loc_line = "#:" + ref
+                if len(loc_line) != "#:":
+                    print(loc_line, file=fp)
+
+                # If the entry was gleaned out of a docstring, then add a
+                # comment stating so. This is to aid translators who may wish
+                # to skip translating some unimportant docstrings.
+                # We're assuming that if one entry was a docstring, then all
+                # other entries of the same msgid are docstrings too.
+                if any(e.is_docstring for e in entry_list):
+                    print("#, docstring", file=fp)
+
+            print("msgid", normalize(msgid), file=fp)
+            print('msgstr ""\n', file=fp)
+
+
+def _parse_args(args: List[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="redgettext",
+        description="pygettext for Red-DiscordBot.",
+        usage="%(prog)s [OPTIONS] INFILE [INFILE ...]",
+    )
+    parser.add_argument(
+        "infiles",
+        nargs="*",
+        metavar="INFILE",
+        type=pathlib.Path,
+        help=(
+            "An input file or directory. When a directory is specified, strings "
+            "will be extracted from all `.py` submodules. Can be multiple."
+        ),
+    )
+    parser.add_argument(
+        "--command-docstrings",
+        "-c",
+        action="store_true",
+        dest="cmd_docstrings",
+        help=(
+            "Extract all cog and command docstrings. Has no effect when used with the "
+            "-D option."
+        ),
+    )
+    parser.add_argument(
+        "--docstrings",
+        "-D",
+        action="store_true",
+        help="Extract all module, class, function and method docstrings.",
+    )
+    parser.add_argument(
+        "--include-context",
+        "-n",
+        action="store_true",
+        default=True,
+        help=(
+            "Include contextual comments for msgid entries. This is the default. "
+            "Opposite of --no-context."
+        ),
+    )
+    parser.add_argument(
+        "--output-dir",
+        "-O",
+        type=pathlib.Path,
+        metavar="DIR",
+        default="locales",
+        help=(
+            "Output files will be placed in DIR. Default is `locales`. Specify `.` to "
+            "output in the same directory."
+        ),
+    )
+    parser.add_argument(
+        "--output-filename",
+        "-o",
+        metavar="FILENAME",
+        default="messages.pot",
+        help="Rename the default output file from messages.pot to FILENAME.",
+    )
+    parser.add_argument(
+        "--no-context",
+        "-N",
+        action="store_false",
+        dest="include_context",
+        help="Don't include contextual comments for msgid entries.",
+    )
+    parser.add_argument(
+        "--recursive",
+        "-r",
+        action="store_true",
+        help=(
+            "For directories passed as input, recurse through subdirectories as well."
+        ),
+    )
+    parser.add_argument(
+        "--relative-to-cwd",
+        "-R",
+        action="store_true",
+        help=(
+            "Output directory will be relative to the current working directory "
+            "instead of the directory being translated."
+        ),
+    )
+    parser.add_argument("--verbose", "-v", action="count", help="Be more verbose.")
+    parser.add_argument(
+        "--version",
+        "-V",
+        action="store_true",
+        help="Print the version of %(prog)s and exit.",
+    )
+    parser.add_argument(
+        "--width",
+        "-w",
+        type=int,
+        metavar="COLUMNS",
+        default=79,
+        help="Set the width of output to COLUMNS.",
+    )
+
+    return parser.parse_args(args)
+
+
+def main(args: List[str]) -> int:
+
+    options = _parse_args(args)
+
+    # TODO: Make these an option
+    options.keywords = DEFAULT_KEYWORDS
+
+    if options.version:
+        print(f"redgettext {__version__}")
+        return 0
+
+    if not options.infiles:
+        print("You must include at least one input file or directory.")
+        return 1
+
+    all_infiles: List[pathlib.Path] = []
+    # noinspection PyUnusedLocal
+    path: pathlib.Path
+    for path in options.infiles:
+        if path.is_dir():
+            if options.recursive:
+                all_infiles.extend(path.glob("**/*.py"))
+            else:
+                all_infiles.extend(path.glob("*.py"))
+        else:
+            all_infiles.append(path)
 
     # slurp through all the files
     eater = TokenEater(options)
-    for filename in args:
-        if filename == '-':
-            if options.verbose:
-                print(_('Reading standard input'))
-            fp = sys.stdin.buffer
-            closep = 0
-        else:
-            if options.verbose:
-                print(_('Working on %s') % filename)
-            fp = open(filename, 'rb')
-            closep = 1
-        try:
-            eater.set_filename(filename)
+    for path in all_infiles:
+        if options.verbose:
+            print("Working on %s" % path)
+        with path.open("rb") as fp:
+            eater.set_cur_file(path)
             try:
                 tokens = tokenize.tokenize(fp.readline)
                 for _token in tokens:
                     eater(*_token)
             except tokenize.TokenError as e:
-                print('%s: %s, line %d, column %d' % (
-                    e.args[0], filename, e.args[1][0], e.args[1][1]),
-                      file=sys.stderr)
-        finally:
-            if closep:
-                fp.close()
+                print(
+                    "%s: %s, line %d, column %d"
+                    % (e.args[0], path, e.args[1][0], e.args[1][1]),
+                    file=sys.stderr,
+                )
 
     # write the output
-    if options.outfile == '-':
-        fp = sys.stdout
-        closep = 0
-    else:
-        if options.outpath:
-            options.outfile = os.path.join(options.outpath, options.outfile)
-        fp = open(options.outfile, 'w')
-        closep = 1
-    try:
-        eater.write(fp)
-    finally:
-        if closep:
-            fp.close()
+    eater.write()
+    return 0
 
 
-if __name__ == '__main__':
-    main()
-    # some more test strings
-    # this one creates a warning
-    _('*** Seen unexpected token "%(token)s"') % {'token': 'test'}
-    _('more' 'than' 'one' 'string')
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
