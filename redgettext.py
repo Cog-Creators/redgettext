@@ -1,6 +1,10 @@
 #! /usr/bin/env python3
 # -*- coding: iso-8859-1 -*-
-# Originally written by Barry Warsaw <barry@python.org>
+# redgettext was originally forked from version 1.5 of pygettext,
+# taken directly from Python Release 3.6.5, by Toby Harradine
+# <tobotimus@gmail.com>
+#
+# pygettext was originally written by Barry Warsaw <barry@python.org>
 #
 # Minimally patched to make it even more xgettext compatible
 # by Peter Funk <pf@artcom-gmbh.de>
@@ -12,6 +16,9 @@
 # directory (including globbing chars, important for Win32).
 # Made docstring fit in 80 chars wide displays using pydoc.
 #
+# Copyright (c) 2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008,
+# 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017 Python Software
+# Foundation; All Rights Reserved
 
 # for selftesting
 try:
@@ -21,48 +28,9 @@ try:
 except ImportError:
     _ = lambda s: s
 
-__doc__ = _("""pygettext -- Python equivalent of xgettext(1)
+__doc__ = _("""redgettext -- Red equivalent of pygettext
 
-Many systems (Solaris, Linux, Gnu) provide extensive tools that ease the
-internationalization of C programs. Most of these tools are independent of
-the programming language and can be used from within Python programs.
-Martin von Loewis' work[1] helps considerably in this regard.
-
-There's one problem though; xgettext is the program that scans source code
-looking for message strings, but it groks only C (or C++). Python
-introduces a few wrinkles, such as dual quoting characters, triple quoted
-strings, and raw strings. xgettext understands none of this.
-
-Enter pygettext, which uses Python's standard tokenize module to scan
-Python source code, generating .pot files identical to what GNU xgettext[2]
-generates for C and C++ code. From there, the standard GNU tools can be
-used.
-
-A word about marking Python strings as candidates for translation. GNU
-xgettext recognizes the following keywords: gettext, dgettext, dcgettext,
-and gettext_noop. But those can be a lot of text to include all over your
-code. C and C++ have a trick: they use the C preprocessor. Most
-internationalized C source includes a #define for gettext() to _() so that
-what has to be written in the source is much less. Thus these are both
-translatable strings:
-
-    gettext("Translatable String")
-    _("Translatable String")
-
-Python of course has no preprocessor so this doesn't work so well.  Thus,
-pygettext searches only for _() by default, but see the -k/--keyword flag
-below for how to augment this.
-
- [1] http://www.python.org/workshops/1997-10/proceedings/loewis.html
- [2] http://www.gnu.org/software/gettext/gettext.html
-
-NOTE: pygettext attempts to be option and feature compatible with GNU
-xgettext where ever possible. However some options are still missing or are
-not fully implemented. Also, xgettext's use of command line switches with
-option arguments is broken, and in these cases, pygettext just defines
-additional switches.
-
-Usage: pygettext [options] inputfile ...
+Usage: redgettext [options] inputfile ...
 
 Options:
 
@@ -80,9 +48,9 @@ Options:
 
     -D
     --docstrings
-        Extract module, class, method, and function docstrings.  These do
-        not need to be wrapped in _() markers, and in fact cannot be for
-        Python to consider them docstrings. (See also the -X option).
+        Extract command and/or cog docstrings.  These do not need to
+        be wrapped in _() markers, and in fact cannot be for Python to
+        consider them docstrings. (See also the -X option).
 
     -h
     --help
@@ -135,7 +103,7 @@ Options:
 
     -V
     --version
-        Print the version of pygettext and exit.
+        Print the version of redgettext and exit.
 
     -w columns
     --width=columns
@@ -166,7 +134,7 @@ import getopt
 import token
 import tokenize
 
-__version__ = '1.5'
+__version__ = '1.0'
 
 default_keywords = ['_']
 DEFAULTKEYWORDS = ', '.join(default_keywords)
@@ -190,7 +158,7 @@ msgstr ""
 "MIME-Version: 1.0\\n"
 "Content-Type: text/plain; charset=%(charset)s\\n"
 "Content-Transfer-Encoding: %(encoding)s\\n"
-"Generated-By: pygettext.py %(version)s\\n"
+"Generated-By: redgettext %(version)s\\n"
 
 ''')
 
@@ -318,10 +286,6 @@ class TokenEater:
         self.__enclosurecount = 0
 
     def __call__(self, ttype, tstring, stup, etup, line):
-        # dispatch
-        ##        import token
-        ##        print('ttype:', token.tok_name[ttype], 'tstring:', tstring,
-        ##              file=sys.stderr)
         self.__state(ttype, tstring, stup[0])
 
     def __waiting(self, ttype, tstring, lineno):
@@ -336,18 +300,24 @@ class TokenEater:
                 elif ttype not in (tokenize.COMMENT, tokenize.NL):
                     self.__freshmodule = 0
                 return
-            # class or func/method docstring?
-            if ttype == tokenize.NAME and tstring in ('class', 'def'):
-                self.__state = self.__suiteseen
+            # cog or command docstring?
+            if ttype == tokenize.OP and tstring == '@':
+                self.__state = self.__decoratorseen
                 return
         if ttype == tokenize.NAME and tstring in opts.keywords:
             self.__state = self.__keywordseen
 
-    def __suiteseen(self, ttype, tstring, lineno):
+    def __decoratorseen(self, ttype, tstring, lineno):
         # skip over any enclosure pairs until we see the colon
+        if ttype == tokenize.NAME and tstring in ('command', 'group', 'cog_i18n'):
+            self.__state = self.__suiteseen
+        elif ttype == tokenize.NEWLINE:
+            self.__state = self.__waiting
+
+    def __suiteseen(self, ttype, tstring, lineno):
         if ttype == tokenize.OP:
             if tstring == ':' and self.__enclosurecount == 0:
-                # we see a colon and we're not in an enclosure: end of def
+                # we see a colon and we're not in an enclosure: end of def/class
                 self.__state = self.__suitedocstring
             elif tstring in '([{':
                 self.__enclosurecount += 1
@@ -386,9 +356,9 @@ class TokenEater:
         elif ttype not in [tokenize.COMMENT, token.INDENT, token.DEDENT,
                            token.NEWLINE, tokenize.NL]:
             # warn if we see anything else than STRING or whitespace
-            print(_(
-                '*** %(file)s:%(lineno)s: Seen unexpected token "%(token)s"'
-            ) % {
+            print((
+                      '*** %(file)s:%(lineno)s: Seen unexpected token "%(token)s"'
+                  ) % {
                       'token': tstring,
                       'file': self.__curfile,
                       'lineno': self.__lineno
@@ -398,7 +368,7 @@ class TokenEater:
     def __addentry(self, msg, lineno=None, isdocstring=0):
         if lineno is None:
             lineno = self.__lineno
-        if not msg in self.__options.toexclude:
+        if msg not in self.__options.toexclude:
             entry = (self.__curfile, lineno)
             self.__messages.setdefault(msg, {})[entry] = isdocstring
 
@@ -438,15 +408,15 @@ class TokenEater:
                 elif options.locationstyle == options.SOLARIS:
                     for filename, lineno in v:
                         d = {'filename': filename, 'lineno': lineno}
-                        print(_(
-                            '# File: %(filename)s, line: %(lineno)d') % d, file=fp)
+                        print((
+                                  '# File: %(filename)s, line: %(lineno)d') % d, file=fp)
                 elif options.locationstyle == options.GNU:
                     # fit as many locations on one line, as long as the
                     # resulting line length doesn't exceed 'options.width'
                     locline = '#:'
                     for filename, lineno in v:
                         d = {'filename': filename, 'lineno': lineno}
-                        s = _(' %(filename)s:%(lineno)d') % d
+                        s = ' %(filename)s:%(lineno)d' % d
                         if len(locline) + len(s) <= options.width:
                             locline = locline + s
                         else:
@@ -530,7 +500,7 @@ def main():
         elif opt in ('-v', '--verbose'):
             options.verbose = 1
         elif opt in ('-V', '--version'):
-            print(_('pygettext.py (xgettext for Python) %s') % __version__)
+            print(_('redgettext (pygettext for Red) %s') % __version__)
             sys.exit(0)
         elif opt in ('-w', '--width'):
             try:
