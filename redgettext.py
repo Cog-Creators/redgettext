@@ -134,7 +134,7 @@ import getopt
 import token
 import tokenize
 
-__version__ = '1.0'
+__version__ = '1.1'
 
 default_keywords = ['_']
 DEFAULTKEYWORDS = ', '.join(default_keywords)
