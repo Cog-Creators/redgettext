@@ -410,7 +410,9 @@ def _parse_args(args: List[str]) -> argparse.Namespace:
     return parser.parse_args(args)
 
 
-def main(args: List[str]) -> int:
+def main(args: Optional[List[str]] = None) -> int:
+    if args is None:
+        args = sys.argv[1:]
 
     options = _parse_args(args)
 
@@ -461,4 +463,4 @@ def main(args: List[str]) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(main())
