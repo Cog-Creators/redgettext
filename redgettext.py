@@ -340,6 +340,16 @@ def _parse_args(args: List[str]) -> argparse.Namespace:
         help="Extract all module, class, function and method docstrings.",
     )
     parser.add_argument(
+        "--exclude-files",
+        "-X",
+        metavar="PATTERN",
+        dest="excluded_files",
+        help=(
+            "Exclude a glob of files from the list of `infiles`. These excluded files will not be "
+            "worked on. This pattern is treated as relative to the current working directory."
+        )
+    )
+    parser.add_argument(
         "--include-context",
         "-n",
         action="store_true",
@@ -438,6 +448,11 @@ def main(args: Optional[List[str]] = None) -> int:
                 all_infiles.extend(path.glob("*.py"))
         else:
             all_infiles.append(path)
+
+    # filter excluded files
+    if options.excluded_files:
+        excluded_files = set(pathlib.Path().glob(options.excluded_files))
+        all_infiles = [f for f in all_infiles if f not in excluded_files]
 
     # slurp through all the files
     eater = TokenEater(options)
