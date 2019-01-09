@@ -29,7 +29,7 @@ import tokenize
 from collections import OrderedDict
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, TextIO, Tuple
 
-__version__ = "2.1"
+__version__ = "2.2"
 
 DEFAULT_KEYWORDS = ["_"]
 
