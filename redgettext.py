@@ -251,18 +251,17 @@ class TokenEater:
         time_str = time.strftime("%Y-%m-%d %H:%M%z")
         for outfile_path, msgid_dict in self.__messages.items():
             outfile_path.parent.mkdir(parents=True, exist_ok=True)
-            with outfile_path.open("w") as fp:
+            with outfile_path.open("w", encoding="utf-8") as fp:
                 self.__write_outfile(fp, msgid_dict, time_str)
 
     def __write_outfile(self, fp: TextIO, msgid_dict: _MsgIDDict, time_str: str):
         opts = self.__options
-        encoding = fp.encoding if fp.encoding else "UTF-8"
         print(
             POT_HEADER
             % {
                 "time": time_str,
                 "version": __version__,
-                "charset": encoding,
+                "charset": "UTF-8",
                 "encoding": "8bit",
             },
             file=fp,
@@ -345,8 +344,9 @@ def _parse_args(args: List[str]) -> argparse.Namespace:
         metavar="PATTERN",
         dest="excluded_files",
         help=(
-            "Exclude a glob of files from the list of `infiles`. These excluded files will not be "
-            "worked on. This pattern is treated as relative to the current working directory."
+            "Exclude a glob of files from the list of `infiles`. These excluded files "
+            "will not be worked on. This pattern is treated as relative to the current "
+            "working directory."
         )
     )
     parser.add_argument(
