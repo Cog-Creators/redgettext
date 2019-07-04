@@ -78,24 +78,47 @@ class TokenEater:
                 if ttype == tokenize.STRING and is_literal_string(string):
                     self.__add_entry(safe_eval(string), lineno, is_docstring=True)
                     self.__fresh_module = False
+                    return
                 elif ttype not in (tokenize.COMMENT, tokenize.NL):
                     self.__fresh_module = False
             # class or method docstring?
             elif ttype == tokenize.NAME and string in ("class", "def"):
                 self.__state = self.__suite_seen
+                return
         # cog or command docstring?
-        elif opts.cmd_docstrings and ttype == tokenize.OP and string == "@":
-            self.__state = self.__decorator_seen
-        elif ttype == tokenize.NAME and string in opts.keywords:
+        if opts.cmd_docstrings:
+            if ttype == tokenize.OP and string == "@":
+                self.__state = self.__decorator_seen
+                return
+            elif ttype == tokenize.NAME and string == "class":
+                self.__state = self.__class_seen
+                return
+        if ttype == tokenize.NAME and string in opts.keywords:
             self.__state = self.__keyword_seen
 
     # noinspection PyUnusedLocal
     def __decorator_seen(self, ttype: int, string: str, lineno: int) -> None:
-        # skip over any enclosure pairs until we see the colon
+        # Look for the @command(), @group() or @cog_i18n() decorators
         if ttype == tokenize.NAME and string in ("command", "group", "cog_i18n"):
             self.__state = self.__suite_seen
         elif ttype == tokenize.NEWLINE:
             self.__state = self.__waiting
+
+    # noinspection PyUnusedLocal
+    def __class_seen(self, ttype: int, string: str, lineno: int) -> None:
+        # Look for the `translator` subclass kwarg
+        if self.__enclosure_count == 1:
+            if ttype == tokenize.NAME and string == "translator":
+                self.__state = self.__suite_seen
+                return
+        if ttype == tokenize.OP:
+            if string == ":" and self.__enclosure_count == 0:
+                # we see a colon and we're not in an enclosure: end of def/class
+                self.__state = self.__waiting
+            elif string in "([{":
+                self.__enclosure_count += 1
+            elif string in ")]}":
+                self.__enclosure_count -= 1
 
     # noinspection PyUnusedLocal
     def __suite_seen(self, ttype: int, string: str, lineno: int) -> None:
