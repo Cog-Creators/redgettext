@@ -21,50 +21,17 @@
 # Foundation; All Rights Reserved
 
 import argparse
-import bisect
 import pathlib
 import sys
 import time
 import tokenize
-from collections import OrderedDict
-from typing import Any, Callable, Dict, List, NamedTuple, Optional, TextIO, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-__version__ = "2.2"
+import polib
+
+__version__ = "3.0"
 
 DEFAULT_KEYWORDS = ["_"]
-
-# The normal pot-file header. msgmerge and Emacs's po-mode work better if it's
-# there.
-POT_HEADER = """\
-# SOME DESCRIPTIVE TITLE.
-# Copyright (C) YEAR ORGANIZATION
-# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
-#
-msgid ""
-msgstr ""
-"Project-Id-Version: PACKAGE VERSION\\n"
-"POT-Creation-Date: %(time)s\\n"
-"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\\n"
-"Last-Translator: FULL NAME <EMAIL@ADDRESS>\\n"
-"Language-Team: LANGUAGE <LL@li.org>\\n"
-"MIME-Version: 1.0\\n"
-"Content-Type: text/plain; charset=%(charset)s\\n"
-"Content-Transfer-Encoding: %(encoding)s\\n"
-"Generated-By: redgettext %(version)s\\n"
-
-"""
-
-
-ESCAPES = {"\\": r"\\", "\t": r"\t", "\r": r"\r", "\n": r"\n", '"': r"\""}
-
-
-def escape(s: str) -> str:
-    ret = ""
-    for char in s:
-        if char in ESCAPES:
-            char = ESCAPES[char]
-        ret += char
-    return ret
 
 
 def is_literal_string(s: str) -> bool:
@@ -76,53 +43,16 @@ def safe_eval(s: str) -> Any:
     return eval(s, {"__builtins__": {}}, {})
 
 
-def normalize(s: str) -> str:
-    # This converts the various Python string types into a format that is
-    # appropriate for .po files, namely much closer to C style.
-    lines = s.split("\n")
-    if len(lines) == 1:
-        s = '"' + escape(s) + '"'
-    else:
-        if not lines[-1]:
-            del lines[-1]
-            lines[-1] = lines[-1] + "\n"
-        for i in range(len(lines)):
-            lines[i] = escape(lines[i])
-        line_term = '\\n"\n"'
-        s = '""\n"' + line_term.join(lines) + '"'
-    return s
-
-
-class _MessageContextEntry(NamedTuple):
-    file: pathlib.Path
-    lineno: int
-    is_docstring: bool
-
-    def __lt__(self, other: Any) -> bool:
-        if not isinstance(other, _MessageContextEntry):
-            raise TypeError(f"Cannot compare with type {type(other)!r}")
-        if self.file == other.file:
-            return self.lineno < other.lineno
-        else:
-            return self.file < other.file
-
-    def __gt__(self, other: Any) -> bool:
-        return not self <= other
-
-
-_MsgIDDict = Dict[str, List[_MessageContextEntry]]
-
-
 class TokenEater:
     def __init__(self, options: argparse.Namespace):
         self.__options: argparse.Namespace = options
-        self.__messages: Dict[pathlib.Path, _MsgIDDict] = {}
         self.__state: Callable[[int, str, int], None] = self.__waiting
         self.__data: List[Any] = []
         self.__lineno: int = -1
         self.__fresh_module: bool = True
         self.__cur_infile: Optional[pathlib.Path] = None
         self.__cur_outfile: Optional[pathlib.Path] = None
+        self.__potfiles: Dict[pathlib.Path, polib.POFile] = {}
         self.__enclosure_count: int = 0
 
     def __call__(
@@ -134,6 +64,10 @@ class TokenEater:
         line: int,
     ) -> None:
         self.__state(ttype, string, start[0])
+
+    @property
+    def __cur_potfile(self) -> polib.POFile:
+        return self.__potfiles.get(self.__cur_outfile)
 
     def __waiting(self, ttype: int, string: str, lineno: int) -> None:
         opts = self.__options
@@ -224,18 +158,25 @@ class TokenEater:
         if lineno is None:
             lineno: int = self.__lineno
 
-        entry = _MessageContextEntry(self.__cur_infile, lineno, is_docstring)
-        # noinspection PyUnusedLocal
-        msgid_dict: _MsgIDDict
-        if self.__cur_outfile in self.__messages:
-            msgid_dict = self.__messages[self.__cur_outfile]
+        entry = next(
+            (entry for entry in self.__cur_potfile if entry.msgid == msg), None
+        )
+        occurrence = (str(self.__cur_infile), lineno)
+        if is_docstring:
+            flags = ["docstring"]
         else:
-            self.__messages[self.__cur_outfile] = msgid_dict = {}
-
-        if msg in msgid_dict:
-            bisect.insort(msgid_dict[msg], entry)
+            flags = []
+        if entry is None:
+            self.__cur_potfile.append(
+                polib.POEntry(
+                    msgid=polib.escape(msg),
+                    occurrences=[occurrence],
+                    flags=flags,
+                )
+            )
         else:
-            msgid_dict[msg] = [entry]
+            entry.occurrences.append(occurrence)
+            entry.occurrences.sort()
 
     def set_cur_file(self, path: pathlib.Path) -> None:
         opts = self.__options
@@ -244,66 +185,27 @@ class TokenEater:
             cur_dir = pathlib.Path()
         else:
             cur_dir = path.parent
-        self.__cur_outfile = cur_dir / opts.output_dir / opts.output_filename
         self.__fresh_module = True
+        self.__cur_outfile = cur_dir / opts.output_dir / opts.output_filename
+        if self.__cur_outfile not in self.__potfiles:
+            self.__potfiles[self.__cur_outfile] = cur_potfile = polib.POFile()
+            cur_potfile.metadata = {
+                "Project-Id-Version": "PACKAGE VERSION",
+                "POT-Creation-Date": time.strftime("%Y-%m-%d %H:%M%z"),
+                "PO-Revision-Date": "YEAR-MO-DA HO:MI+ZONE",
+                "Last-Translator": "FULL NAME <EMAIL@ADDRESS>",
+                "Language-Team": "LANGUAGE <LL@li.org>",
+                "MIME-Version": "1.0",
+                "Content-Type": "text/plain; charset=UTF-8",
+                "Content-Transfer-Encoding": "8bit",
+                "Generated-By": f"redgettext {__version__}",
+            }
 
     def write(self) -> None:
-        time_str = time.strftime("%Y-%m-%d %H:%M%z")
-        for outfile_path, msgid_dict in self.__messages.items():
+        for outfile_path, potfile in self.__potfiles.items():
             outfile_path.parent.mkdir(parents=True, exist_ok=True)
-            with outfile_path.open("w", encoding="utf-8") as fp:
-                self.__write_outfile(fp, msgid_dict, time_str)
-
-    def __write_outfile(self, fp: TextIO, msgid_dict: _MsgIDDict, time_str: str):
-        opts = self.__options
-        print(
-            POT_HEADER
-            % {
-                "time": time_str,
-                "version": __version__,
-                "charset": "UTF-8",
-                "encoding": "8bit",
-            },
-            file=fp,
-        )
-
-        # Sort the entries.
-        # The entry lists for each msgid are already sorted,
-        # so we'll just sort by the first entry in each list
-        try:
-            sorted_msgid_items: List[Tuple[str, _MessageContextEntry]] = sorted(
-                msgid_dict.items(), key=lambda tup: tup[1][0]
-            )
-        except TypeError:
-            print(msgid_dict)
-            sys.exit(1)
-        msgid_dict = OrderedDict(sorted_msgid_items)
-        for msgid, entry_list in msgid_dict.items():
-            if opts.include_context:
-                # Add the reference comment.
-                # Fit as many locations on one line, as long as the
-                # resulting line length doesn't exceed 'options.width'.
-                loc_line = "#:"
-                for entry in entry_list:
-                    ref = f" {entry.file}:{entry.lineno}"
-                    if len(loc_line) + len(ref) <= opts.width:
-                        loc_line = loc_line + ref
-                    else:
-                        print(loc_line, file=fp)
-                        loc_line = "#:" + ref
-                if len(loc_line) != "#:":
-                    print(loc_line, file=fp)
-
-                # If the entry was gleaned out of a docstring, then add a
-                # comment stating so. This is to aid translators who may wish
-                # to skip translating some unimportant docstrings.
-                # We're assuming that if one entry was a docstring, then all
-                # other entries of the same msgid are docstrings too.
-                if any(e.is_docstring for e in entry_list):
-                    print("#, docstring", file=fp)
-
-            print("msgid", normalize(msgid), file=fp)
-            print('msgstr ""\n', file=fp)
+            potfile.sort(key=lambda e: e.occurrences[0])
+            potfile.save(str(outfile_path))
 
 
 def _parse_args(args: List[str]) -> argparse.Namespace:
@@ -347,7 +249,7 @@ def _parse_args(args: List[str]) -> argparse.Namespace:
             "Exclude a glob of files from the list of `infiles`. These excluded files "
             "will not be worked on. This pattern is treated as relative to the current "
             "working directory."
-        )
+        ),
     )
     parser.add_argument(
         "--include-context",
