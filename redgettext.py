@@ -29,7 +29,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import polib
 
-__version__ = "3.0"
+__version__ = "3.1"
 
 DEFAULT_KEYWORDS = ["_"]
 
@@ -226,6 +226,8 @@ class TokenEater:
 
     def write(self) -> None:
         for outfile_path, potfile in self.__potfiles.items():
+            if not potfile and self.__options.omit_empty:
+                continue
             outfile_path.parent.mkdir(parents=True, exist_ok=True)
             potfile.sort(key=lambda e: e.occurrences[0])
             potfile.save(str(outfile_path))
@@ -283,6 +285,11 @@ def _parse_args(args: List[str]) -> argparse.Namespace:
             "Include contextual comments for msgid entries. This is the default. "
             "Opposite of --no-context."
         ),
+    )
+    parser.add_argument(
+        "--omit-empty",
+        action="store_true",
+        help="Empty .pot files will not be outputted."
     )
     parser.add_argument(
         "--output-dir",
