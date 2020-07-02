@@ -9,7 +9,7 @@
 # Minimally patched to make it even more xgettext compatible
 # by Peter Funk <pf@artcom-gmbh.de>
 #
-# 2002-11-22 Jürgen Hermann <jh@web.de>
+# 2002-11-22 JÃ¼rgen Hermann <jh@web.de>
 # Added checks that _() only contains string literals, and
 # command line args are resolved to module lists, i.e. you
 # can now pass a filename, a module or package name, or a
@@ -270,10 +270,11 @@ def _parse_args(args: List[str]) -> argparse.Namespace:
         "-X",
         metavar="PATTERN",
         dest="excluded_files",
+        action="append",
         help=(
             "Exclude a glob of files from the list of `infiles`. These excluded files "
             "will not be worked on. This pattern is treated as relative to the current "
-            "working directory."
+            "working directory. You can use this flag multiple times."
         ),
     )
     parser.add_argument(
@@ -382,8 +383,8 @@ def main(args: Optional[List[str]] = None) -> int:
             all_infiles.append(path)
 
     # filter excluded files
-    if options.excluded_files:
-        excluded_files = set(pathlib.Path().glob(options.excluded_files))
+    for glob in options.excluded_files:
+        excluded_files = set(pathlib.Path().glob(glob))
         all_infiles = [f for f in all_infiles if f not in excluded_files]
 
     # slurp through all the files
