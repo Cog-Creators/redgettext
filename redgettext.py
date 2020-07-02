@@ -27,9 +27,12 @@ import time
 import tokenize
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-import polib
+try:
+    import polib
+except ImportError:
+    polib = None
 
-__version__ = "3.1"
+__version__ = "3.2"
 
 DEFAULT_KEYWORDS = ["_"]
 
