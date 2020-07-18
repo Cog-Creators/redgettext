@@ -386,9 +386,10 @@ def main(args: Optional[List[str]] = None) -> int:
             all_infiles.append(path)
 
     # filter excluded files
-    for glob in options.excluded_files:
-        excluded_files = set(pathlib.Path().glob(glob))
-        all_infiles = [f for f in all_infiles if f not in excluded_files]
+    if options.excluded_files:
+        for glob in options.excluded_files:
+            excluded_files = set(pathlib.Path().glob(glob))
+            all_infiles = [f for f in all_infiles if f not in excluded_files]
 
     # slurp through all the files
     eater = TokenEater(options)
