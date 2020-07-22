@@ -195,7 +195,7 @@ class TokenEater:
         if entry is None:
             self.__cur_potfile.append(
                 polib.POEntry(
-                    msgid=polib.escape(msg),
+                    msgid=msg,
                     occurrences=[occurrence],
                     flags=flags,
                 )
