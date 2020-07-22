@@ -1,5 +1,4 @@
 #! /usr/bin/env python3
-# -*- coding: iso-8859-1 -*-
 # redgettext was originally forked from version 1.5 of pygettext,
 # taken directly from Python Release 3.6.5, by Toby Harradine
 # <tobyharradine@gmail.com>
