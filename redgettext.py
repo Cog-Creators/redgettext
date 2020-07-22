@@ -31,7 +31,7 @@ try:
 except ImportError:
     polib = None
 
-__version__ = "3.2"
+__version__ = "3.3"
 
 DEFAULT_KEYWORDS = ["_"]
 
