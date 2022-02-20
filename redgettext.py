@@ -292,7 +292,7 @@ def _parse_args(args: List[str]) -> argparse.Namespace:
     parser.add_argument(
         "--omit-empty",
         action="store_true",
-        help="Empty .pot files will not be outputted."
+        help="Empty .pot files will not be outputted.",
     )
     parser.add_argument(
         "--output-dir",
