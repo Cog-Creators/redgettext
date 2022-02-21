@@ -163,7 +163,7 @@ class TokenEater:
                         )
                         continue
                     if isinstance(arg.value, str):
-                        self.__addentry(arg.value, lineno)
+                        self.__add_entry(arg.value, lineno)
 
     # noinspection PyUnusedLocal
     def __decorator_seen(self, ttype: int, string: str, lineno: int) -> None:
