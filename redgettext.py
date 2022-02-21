@@ -100,7 +100,7 @@ class TokenEater:
             self.__state = self.__keyword_seen
             return
         if ttype == tokenize.STRING:
-            maybe_fstring = ast.parse(tstring, mode="eval").body
+            maybe_fstring = ast.parse(string, mode="eval").body
             if not isinstance(maybe_fstring, ast.JoinedStr):
                 return
             for value in filter(
@@ -125,9 +125,9 @@ class TokenEater:
                             " positional arguments in gettext call: %(source_segment)s"
                             % {
                                 "source_segment": (
-                                    ast.get_source_segment(tstring, call) or tstring
+                                    ast.get_source_segment(string, call) or string
                                 ),
-                                "file": self.__curfile,
+                                "file": self.__cur_infile,
                                 "lineno": lineno,
                             },
                             file=sys.stderr,
@@ -139,9 +139,9 @@ class TokenEater:
                             " in gettext call: %(source_segment)s"
                             % {
                                 "source_segment": (
-                                    ast.get_source_segment(tstring, call) or tstring
+                                    ast.get_source_segment(string, call) or string
                                 ),
-                                "file": self.__curfile,
+                                "file": self.__cur_infile,
                                 "lineno": lineno,
                             },
                             file=sys.stderr,
@@ -154,9 +154,9 @@ class TokenEater:
                             " in gettext call: %(source_segment)s"
                             % {
                                 "source_segment": (
-                                    ast.get_source_segment(tstring, call) or tstring
+                                    ast.get_source_segment(string, call) or string
                                 ),
-                                "file": self.__curfile,
+                                "file": self.__cur_infile,
                                 "lineno": lineno,
                             },
                             file=sys.stderr,
