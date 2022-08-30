@@ -82,10 +82,11 @@ class TokenEater:
                     self.__add_entry(safe_eval(string), lineno, is_docstring=True)
                     self.__fresh_module = False
                     return
-                elif ttype not in (tokenize.COMMENT, tokenize.NL):
-                    self.__fresh_module = False
+                if ttype in (tokenize.COMMENT, tokenize.NL, tokenize.ENCODING):
+                    return
+                self.__fresh_module = False
             # class or method docstring?
-            elif ttype == tokenize.NAME and string in ("class", "def"):
+            if ttype == tokenize.NAME and string in ("class", "def"):
                 self.__state = self.__suite_seen
                 return
         # cog or command docstring?
