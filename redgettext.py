@@ -1,17 +1,12 @@
 import argparse
-import os
+import ast
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Union
+from typing import Dict, List, Optional, Union
 
-import libcst as cst
-from libcst.metadata import PositionProvider
 import polib
 
-
-# performance boost + support for Python 3.10 and 3.11 syntax
-os.environ["LIBCST_PARSER_TYPE"] = "native"
 
 __version__ = "4.0.0"
 
@@ -99,119 +94,113 @@ class POTFileManager:
             entry.occurrences.sort()
 
 
-class MessageExtractor(cst.CSTVisitor):
-    METADATA_DEPENDENCIES = (PositionProvider,)
-
-    module: cst.Module
-
-    def __init__(self, potfile_manager: POTFileManager) -> None:
+class MessageExtractor(ast.NodeVisitor):
+    def __init__(self, source: str, potfile_manager: POTFileManager) -> None:
+        self.source = source
         self.potfile_manager = potfile_manager
         self.options = potfile_manager.options
 
-    def get_literal_string(
-        self, node: cst.BaseExpression
-    ) -> Union[cst.SimpleString, cst.ConcatenatedString, None]:
-        if not isinstance(node, (cst.SimpleString, cst.ConcatenatedString)):
+    @classmethod
+    def extract_messages(cls, source: str, potfile_manager: POTFileManager) -> None:
+        module = ast.parse(source)
+        self = cls(source, potfile_manager)
+        self.visit(module)
+
+    def get_literal_string(self, node: ast.AST) -> Optional[ast.Constant]:
+        if type(node) is ast.Constant and isinstance(node.value, str):
+            return node
+        else:
             return None
-        # concatenated string may be None if some part of it is an f-string
-        if node.evaluated_value is None:
-            return None
-        return node
 
     def get_docstring_node(
-        self, node: Union[cst.Module, cst.ClassDef, cst.FunctionDef]
-    ) -> Union[cst.SimpleString, cst.ConcatenatedString, None]:
+        self, node: Union[ast.Module, ast.ClassDef, ast.AsyncFunctionDef, ast.FunctionDef]
+    ) -> Optional[ast.Constant]:
         body = node.body
-        expr: cst.BaseSuite | cst.BaseStatement | cst.BaseSmallStatement
-        if isinstance(body, Sequence):
-            if not body:
-                return None
-            expr = body[0]
-        else:
-            expr = body
-
-        while isinstance(expr, (cst.BaseSuite, cst.SimpleStatementLine)):
-            if not expr.body:
-                return None
-            expr = expr.body[0]
-        if not isinstance(expr, cst.Expr):
+        if not body:
+            return None
+        expr = body[0]
+        if type(expr) is not ast.Expr:
             return None
 
         return self.get_literal_string(expr.value)
 
-    def print_error(self, starting_node: cst.CSTNode, message: str) -> None:
+    def print_error(self, starting_node: ast.AST, message: str) -> None:
         file = self.potfile_manager.current_infile
-        lineno = self.get_metadata(PositionProvider, starting_node).start.line
-        code = self.module.code_for_node(starting_node)
-        print(f"*** {file}:{lineno}: {message}:\n{code}", file=sys.stderr)
+        code = ast.get_source_segment(self.source, starting_node, padded=True)
+        print(f"*** {file}:{starting_node.lineno}: {message}:\n{code}", file=sys.stderr)
 
-    def visit_Call(self, node: cst.Call) -> None:
-        if type(node.func) is cst.Name:
-            if node.func.value not in self.options.keywords:
-                return
-        elif type(node.func) is cst.Attribute:
-            if node.func.attr.value not in self.options.keywords:
-                return
+    def visit_Call(self, node: ast.Call) -> None:
+        if type(node.func) is ast.Name:
+            if node.func.id not in self.options.keywords:
+                return self.generic_visit(node)
+        elif type(node.func) is ast.Attribute:
+            if node.func.attr not in self.options.keywords:
+                return self.generic_visit(node)
         else:
-            return
+            return self.generic_visit(node)
 
         if len(node.args) != 1:
             self.print_error(
                 node, "Seen unexpected amount of positional arguments in gettext call"
             )
-            return
-        arg = node.args[0]
-        # argument needs to be positional
-        if arg.keyword is not None:
-            self.print_error(node, "Seen unexpected keyword arguments in gettext call")
-            return
-        if arg.star:
-            self.print_error(
-                node, "Seen unexpected variadic positional argument (*args) in gettext call"
-            )
-            return
+            return self.generic_visit(node)
 
-        string_node = self.get_literal_string(arg.value)
+        if node.keywords:
+            self.print_error(node, "Seen unexpected keyword arguments in gettext call")
+            return self.generic_visit(node)
+
+        arg = node.args[0]
+        string_node = self.get_literal_string(arg)
         if string_node is not None:
             self.add_entry(string_node, starting_node=node)
         else:
             self.print_error(node, "Seen unexpected argument type in gettext call")
 
-    def visit_Module(self, node: cst.Module) -> None:
-        self.module = node
+        return self.generic_visit(node)
+
+    def visit_Module(self, node: ast.Module) -> None:
         if not self.options.docstrings:
-            return
+            return self.generic_visit(node)
 
         docstring_node = self.get_docstring_node(node)
         if docstring_node is not None:
             self.add_entry(docstring_node, is_docstring=True)
 
-    def visit_ClassDef(self, node: cst.ClassDef) -> None:
-        self.handle_class_or_function(node)
+        return self.generic_visit(node)
 
-    def visit_FunctionDef(self, node: cst.FunctionDef) -> None:
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
         self.handle_class_or_function(node)
+        return self.generic_visit(node)
 
-    def handle_class_or_function(self, node: Union[cst.ClassDef, cst.FunctionDef]) -> None:
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self.handle_class_or_function(node)
+        return self.generic_visit(node)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self.handle_class_or_function(node)
+        return self.generic_visit(node)
+
+    def handle_class_or_function(
+        self, node: Union[ast.ClassDef, ast.AsyncFunctionDef, ast.FunctionDef]
+    ) -> None:
         if self.options.docstrings:
             pass
         elif self.options.cmd_docstrings:
-            if isinstance(node, cst.ClassDef):
+            if isinstance(node, ast.ClassDef):
                 decorator_names = CLASS_DECORATOR_NAMES
             else:
                 decorator_names = FUNCTION_DECORATOR_NAMES
 
-            for decorator in node.decorators:
+            for deco in node.decorator_list:
                 # @deco_name is not valid, it needs to be a call: @deco_name(...)
-                deco = decorator.decorator
-                if type(deco) is not cst.Call:
+                if type(deco) is not ast.Call:
                     continue
-                if type(deco.func) is cst.Name:
-                    if deco.func.value in decorator_names:
+                if type(deco.func) is ast.Name:
+                    if deco.func.id in decorator_names:
                         break
-                elif type(deco.func) is cst.Attribute:
+                elif type(deco.func) is ast.Attribute:
                     # in `a.b.c()`, only `c` is checked
-                    if deco.func.attr.value in decorator_names:
+                    if deco.func.attr in decorator_names:
                         break
             else:
                 return
@@ -224,19 +213,16 @@ class MessageExtractor(cst.CSTVisitor):
 
     def add_entry(
         self,
-        node: Union[cst.SimpleString, cst.ConcatenatedString],
+        node: ast.Constant,
         *,
-        starting_node: Optional[cst.CSTNode] = None,
+        starting_node: Optional[ast.AST] = None,
         is_docstring: bool = False,
     ) -> None:
-        evaluated_value = node.evaluated_value
-        if evaluated_value is None:
-            return
         if starting_node is None:
             starting_node = node
         self.potfile_manager.add_entry(
-            evaluated_value,
-            lineno=self.get_metadata(PositionProvider, starting_node).start.line,
+            node.value,
+            lineno=starting_node.lineno,
             is_docstring=is_docstring,
         )
 
@@ -398,16 +384,18 @@ def main(args: Optional[List[str]] = None) -> int:
     for path in all_infiles:
         if options.verbose:
             print(f"Working on {path}")
-        with path.open("rb") as fp:
+        with path.open("r") as fp:
             potfile_manager.set_current_file(path)
             try:
-                module = cst.parse_module(fp.read())
-            except cst.ParserSyntaxError as exc:
-                print(f"{path}:", str(exc), file=sys.stderr)
-            else:
-                wrapper = cst.MetadataWrapper(module, unsafe_skip_copy=True)
-                visitor = MessageExtractor(potfile_manager)
-                wrapper.visit(visitor)
+                MessageExtractor.extract_messages(fp.read(), potfile_manager)
+            except SyntaxError as exc:
+                if exc.text is None:
+                    msg = f"{exc.__class__.__name__}: {exc}"
+                else:
+                    msg = "{0.text}\n{1:>{0.offset}}\n{2}: {0}".format(
+                        exc, "^", type(exc).__name__
+                    )
+                print(f"{path}:", msg, file=sys.stderr)
 
     # write the output
     potfile_manager.write()

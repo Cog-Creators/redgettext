@@ -31,7 +31,6 @@ keywords = [
 ]
 requires-python = ">=3.8"
 dependencies = [
-    "libcst",
     "polib",
 ]
 dynamic = ["version"]
