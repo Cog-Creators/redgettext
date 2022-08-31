@@ -1,5 +1,5 @@
 [flake8]
-max-line-length = 88
+max-line-length = 99
 select = C,E,F,W
 # E203 whitespace before ':'
 #   incompatible with Black
