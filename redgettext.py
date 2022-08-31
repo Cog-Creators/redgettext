@@ -57,6 +57,7 @@ class TokenEater:
         self.__cur_outfile: Optional[pathlib.Path] = None
         self.__potfiles: Dict[pathlib.Path, polib.POFile] = {}
         self.__enclosure_count: int = 0
+        self.__previous_ttype: int = tokenize.NL
 
     def __call__(
         self,
@@ -90,7 +91,18 @@ class TokenEater:
                 return
         # cog or command docstring?
         if opts.cmd_docstrings:
-            if ttype == tokenize.OP and string == "@":
+            # checking previous token type to ensure this is a deco
+            # rather than the matrix multiplication operator
+            if (
+                ttype == tokenize.OP
+                and string == "@"
+                and self.__previous_ttype
+                in (
+                    tokenize.INDENT,
+                    tokenize.NL,
+                    tokenize.NEWLINE,
+                )
+            ):
                 self.__state = self.__decorator_seen
                 return
             elif ttype == tokenize.NAME and string == "class":
