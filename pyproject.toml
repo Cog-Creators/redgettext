@@ -1,7 +1,53 @@
 [build-system]
-    requires = ["setuptools", "wheel"]
-    build-backend = "setuptools.build_meta"
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "redgettext"
+description = "A slightly modified pygettext for Red-DiscordBot"
+license = { file = "LICENSE" }
+readme = "README.rst"
+authors = [
+    { name = "Cog Creators" },
+    { name = "Toby Harradine" },
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.6",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+]
+keywords = [
+    "gettext",
+    "redbot",
+    "red-discordbot",
+]
+requires-python = ">=3.6"
+dependencies = [
+    "polib",
+]
+dynamic = ["version"]
+
+[project.scripts]
+redgettext = "redgettext:main"
+
+[project.urls]
+"Homepage" = "https://github.com/Cog-Creators/redgettext"
+"Discord Server" = "https://discord.gg/red"
+"Donate on Patreon" = "https://www.patreon.com/Red_Devs"
+"Issue Tracker" = "https://github.com/Cog-Creators/redgettext/issues"
+"Source Code" = "https://github.com/Cog-Creators/redgettext"
+
+[tool.setuptools.dynamic]
+version = {attr = "redgettext.__version__"}
 
 [tool.black]
-    target-version = ['py38']
-    include = '\.py$'
+target-version = ['py38']
+include = '\.py$'
