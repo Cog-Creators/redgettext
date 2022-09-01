@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import ast
 import sys
@@ -15,8 +17,38 @@ FUNCTION_DECORATOR_NAMES = ("command", "group")
 DEFAULT_KEYWORDS = ["_"]
 
 
+class Options:
+    def __init__(
+        self,
+        *,
+        omit_empty: bool = False,
+        keywords: List[str] = DEFAULT_KEYWORDS,
+        docstrings: bool = False,
+        cmd_docstrings: bool = False,
+        relative_to_cwd: bool = False,
+        output_dir: str = "locales",
+        output_filename: str = "messages.pot",
+    ) -> None:
+        self.omit_empty = omit_empty
+        self.keywords = keywords
+        self.docstrings = docstrings
+        self.cmd_docstrings = cmd_docstrings
+        self.relative_to_cwd = relative_to_cwd
+        self.output_dir = output_dir
+        self.output_filename = output_filename
+
+    @classmethod
+    def from_args(cls, namespace: argparse.Namespace) -> Options:
+        return cls(
+            omit_empty=namespace.omit_empty,
+            keywords=namespace.keywords,
+            docstrings=namespace.docstrings,
+            cmd_docstrings=namespace.cmd_docstrings,
+        )
+
+
 class POTFileManager:
-    def __init__(self, options: argparse.Namespace) -> None:
+    def __init__(self, options: Options) -> None:
         self.options = options
         self._potfiles: Dict[Path, polib.POFile] = {}
         self.current_infile: Optional[Path] = None
@@ -34,17 +66,21 @@ class POTFileManager:
         if self._current_outfile not in self._potfiles:
             self.current_potfile = polib.POFile()
             self._potfiles[self._current_outfile] = self.current_potfile
-            self.current_potfile.metadata = {
-                "Project-Id-Version": "PACKAGE VERSION",
-                "POT-Creation-Date": time.strftime("%Y-%m-%d %H:%M%z"),
-                "PO-Revision-Date": "YEAR-MO-DA HO:MI+ZONE",
-                "Last-Translator": "FULL NAME <EMAIL@ADDRESS>",
-                "Language-Team": "LANGUAGE <LL@li.org>",
-                "MIME-Version": "1.0",
-                "Content-Type": "text/plain; charset=UTF-8",
-                "Content-Transfer-Encoding": "8bit",
-                "Generated-By": f"redgettext {__version__}",
-            }
+            self.current_potfile.metadata = self.get_potfile_metadata()
+
+    @staticmethod
+    def get_potfile_metadata() -> Dict[str, str]:
+        return {
+            "Project-Id-Version": "PACKAGE VERSION",
+            "POT-Creation-Date": time.strftime("%Y-%m-%d %H:%M%z"),
+            "PO-Revision-Date": "YEAR-MO-DA HO:MI+ZONE",
+            "Last-Translator": "FULL NAME <EMAIL@ADDRESS>",
+            "Language-Team": "LANGUAGE <LL@li.org>",
+            "MIME-Version": "1.0",
+            "Content-Type": "text/plain; charset=UTF-8",
+            "Content-Transfer-Encoding": "8bit",
+            "Generated-By": f"redgettext {__version__}",
+        }
 
     def write(self) -> None:
         for outfile_path, potfile in self._potfiles.items():
@@ -101,10 +137,11 @@ class MessageExtractor(ast.NodeVisitor):
         self.options = potfile_manager.options
 
     @classmethod
-    def extract_messages(cls, source: str, potfile_manager: POTFileManager) -> None:
+    def extract_messages(cls, source: str, potfile_manager: POTFileManager) -> MessageExtractor:
         module = ast.parse(source)
         self = cls(source, potfile_manager)
         self.visit(module)
+        return self
 
     def get_literal_string(self, node: ast.AST) -> Optional[ast.Constant]:
         if type(node) is ast.Constant and isinstance(node.value, str):
@@ -349,24 +386,24 @@ def main(args: Optional[List[str]] = None) -> int:
     if args is None:
         args = sys.argv[1:]
 
-    options = _parse_args(args)
+    args = _parse_args(args)
 
     # TODO: Make these an option
-    options.keywords = DEFAULT_KEYWORDS
+    args.keywords = DEFAULT_KEYWORDS
 
-    if options.version:
+    if args.version:
         print(f"redgettext {__version__}")
         return 0
 
-    if not options.infiles:
+    if not args.infiles:
         print("You must include at least one input file or directory.")
         return 1
 
     all_infiles: List[Path] = []
     path: Path
-    for path in options.infiles:
+    for path in args.infiles:
         if path.is_dir():
-            if options.recursive:
+            if args.recursive:
                 all_infiles.extend(path.glob("**/*.py"))
             else:
                 all_infiles.extend(path.glob("*.py"))
@@ -374,15 +411,16 @@ def main(args: Optional[List[str]] = None) -> int:
             all_infiles.append(path)
 
     # filter excluded files
-    if options.excluded_files:
-        for glob in options.excluded_files:
+    if args.excluded_files:
+        for glob in args.excluded_files:
             excluded_files = set(Path().glob(glob))
             all_infiles = [f for f in all_infiles if f not in excluded_files]
 
     # slurp through all the files
+    options = Options.from_args(args)
     potfile_manager = POTFileManager(options)
     for path in all_infiles:
-        if options.verbose:
+        if args.verbose:
             print(f"Working on {path}")
         with path.open("r") as fp:
             potfile_manager.set_current_file(path)
