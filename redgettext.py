@@ -591,6 +591,25 @@ def _parse_args(args: List[str]) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--keyword",
+        "-k",
+        action="append",
+        default=[],
+        dest="keyword_specs",
+        help=(
+            "Specify keyword spec as an additional keyword to be looked for."
+            " This follows xgettext's keywordspec format with the exclusion of support for"
+            " GNOME glib syntax.\n"
+            "To disable default keywords, use `--no-default-keywords` flag."
+        ),
+    )
+    parser.add_argument(
+        "--no-default-keywords",
+        action="store_false",
+        dest="include_default_keywords",
+        help="Don't include default keywords.",
+    )
+    parser.add_argument(
         "--omit-empty",
         action="store_true",
         help="Empty .pot files will not be outputted.",
@@ -659,10 +678,6 @@ def main(args: Optional[List[str]] = None) -> int:
         args = sys.argv[1:]
 
     args = _parse_args(args)
-
-    # TODO: Make these an option
-    args.keyword_specs = []
-    args.include_default_keywords = True
 
     if args.version:
         print(f"redgettext {__version__}")
