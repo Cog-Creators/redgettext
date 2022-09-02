@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import argparse
 import ast
+import re
 import sys
 import time
-import tokenize
-from io import StringIO
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
@@ -143,6 +142,8 @@ class POTFileManager:
 
 
 class MessageExtractor(ast.NodeVisitor):
+    COMMENT_RE = re.compile(r"[\t ]*(#(?P<comment>.*))?")
+
     def __init__(self, source: str, potfile_manager: POTFileManager) -> None:
         self.source = source
         self.potfile_manager = potfile_manager
@@ -153,13 +154,22 @@ class MessageExtractor(ast.NodeVisitor):
     def collect_comments(self) -> None:
         comment_tag = self.options.comment_tag
         current_comment = []
-        for token in tokenize.generate_tokens(StringIO(self.source).readline):
-            if token.type == tokenize.COMMENT:
-                comment = token.string[1:].strip()
+        pattern = self.COMMENT_RE
+        for lineno, line in enumerate(self.source.splitlines(), 1):
+            if match := pattern.fullmatch(line):
+                comment = match["comment"]
+                if comment is None:
+                    # regex matched a whitespace-only line which we want to ignore
+                    continue
+                comment = comment.strip()
+                # Collect a (potentially first) comment when we're either
+                # already collecting comments or we encounter a comment that starts with the tag.
                 if current_comment or comment.startswith(comment_tag):
                     current_comment.append(comment)
-            elif current_comment and token.type not in (tokenize.NL, tokenize.NEWLINE):
-                self.translator_comments[token.start[0]] = "\n".join(current_comment)
+            # regex doesn't match - this line is neither whitespace nor comment
+            elif current_comment:
+                # We're currently collecting comments so this is the time to save.
+                self.translator_comments[lineno] = "\n".join(current_comment)
                 current_comment.clear()
 
     @classmethod
