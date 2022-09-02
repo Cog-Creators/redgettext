@@ -4,6 +4,8 @@ import argparse
 import ast
 import sys
 import time
+import tokenize
+from io import StringIO
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
@@ -23,6 +25,7 @@ class Options:
         *,
         omit_empty: bool = False,
         keywords: List[str] = DEFAULT_KEYWORDS,
+        comment_tag: str = "Translators: ",
         docstrings: bool = False,
         cmd_docstrings: bool = False,
         relative_to_cwd: bool = False,
@@ -31,6 +34,7 @@ class Options:
     ) -> None:
         self.omit_empty = omit_empty
         self.keywords = keywords
+        self.comment_tag = comment_tag.lstrip()
         self.docstrings = docstrings
         self.cmd_docstrings = cmd_docstrings
         self.relative_to_cwd = relative_to_cwd
@@ -94,6 +98,7 @@ class POTFileManager:
         self,
         msgid: str,
         *,
+        comment: Optional[str] = None,
         lineno: int,
         is_docstring: bool = False,
     ) -> None:
@@ -110,6 +115,8 @@ class POTFileManager:
             )
             return
 
+        comment = comment or ""
+
         entry = self.current_potfile.find(msgid)
         if is_docstring:
             flags = ["docstring"]
@@ -119,11 +126,16 @@ class POTFileManager:
             self.current_potfile.append(
                 polib.POEntry(
                     msgid=msgid,
+                    comment=comment,
                     occurrences=[occurrence],
                     flags=flags,
                 )
             )
         else:
+            if not entry.comment:
+                entry.comment = comment
+            elif comment:
+                entry.comment = f"{entry.comment}\n{comment}"
             if not entry.flags:
                 entry.flags = flags
             entry.occurrences.append(occurrence)
@@ -135,12 +147,30 @@ class MessageExtractor(ast.NodeVisitor):
         self.source = source
         self.potfile_manager = potfile_manager
         self.options = potfile_manager.options
+        # {line_number: comment contents}
+        self.translator_comments: Dict[int, str] = {}
+
+    def collect_comments(self) -> None:
+        comment_tag = self.options.comment_tag
+        current_comment = []
+        for token in tokenize.generate_tokens(StringIO(self.source).readline):
+            if token.type == tokenize.COMMENT:
+                comment = token.string[1:].strip()
+                if current_comment or comment.startswith(comment_tag):
+                    current_comment.append(comment)
+            elif current_comment and token.type not in (tokenize.NL, tokenize.NEWLINE):
+                self.translator_comments[token.start[0]] = "\n".join(current_comment)
+                current_comment.clear()
 
     @classmethod
     def extract_messages(cls, source: str, potfile_manager: POTFileManager) -> MessageExtractor:
         module = ast.parse(source)
         self = cls(source, potfile_manager)
+        self.collect_comments()
         self.visit(module)
+        file = self.potfile_manager.current_infile
+        for lineno in self.translator_comments:
+            print(f"{file}:{lineno}: unused translator comment", file=sys.stderr)
         return self
 
     def get_literal_string(self, node: ast.AST) -> Optional[ast.Constant]:
@@ -189,7 +219,14 @@ class MessageExtractor(ast.NodeVisitor):
         arg = node.args[0]
         string_node = self.get_literal_string(arg)
         if string_node is not None:
-            self.add_entry(string_node, starting_node=node)
+            comments = []
+            for commentable_node in (node, string_node):
+                if commentable_node is not None:
+                    comment = self.translator_comments.pop(commentable_node.lineno, None)
+                    if comment is not None:
+                        comments.append(comment)
+
+            self.add_entry(string_node, comment="\n".join(comments), starting_node=node)
         else:
             self.print_error(node, "Seen unexpected argument type in gettext call")
 
@@ -252,6 +289,7 @@ class MessageExtractor(ast.NodeVisitor):
         self,
         node: ast.Constant,
         *,
+        comment: str = "",
         starting_node: Optional[ast.AST] = None,
         is_docstring: bool = False,
     ) -> None:
@@ -259,6 +297,7 @@ class MessageExtractor(ast.NodeVisitor):
             starting_node = node
         self.potfile_manager.add_entry(
             node.value,
+            comment=comment,
             lineno=starting_node.lineno,
             is_docstring=is_docstring,
         )
