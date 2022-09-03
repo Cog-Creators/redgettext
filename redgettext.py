@@ -1,287 +1,45 @@
-#! /usr/bin/env python3
-# redgettext was originally forked from version 1.5 of pygettext,
-# taken directly from Python Release 3.6.5, by Toby Harradine
-# <tobyharradine@gmail.com>
-#
-# pygettext was originally written by Barry Warsaw <barry@python.org>
-#
-# Minimally patched to make it even more xgettext compatible
-# by Peter Funk <pf@artcom-gmbh.de>
-#
-# 2002-11-22 Jürgen Hermann <jh@web.de>
-# Added checks that _() only contains string literals, and
-# command line args are resolved to module lists, i.e. you
-# can now pass a filename, a module or package name, or a
-# directory (including globbing chars, important for Win32).
-# Made docstring fit in 80 chars wide displays using pydoc.
-#
-# Copyright (c) 2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008,
-# 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017 Python Software
-# Foundation; All Rights Reserved
-
 import argparse
-import ast
-import pathlib
+import os
 import sys
 import time
-import tokenize
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Union
 
-try:
-    import polib
-except ImportError:
-    polib = None
+import libcst as cst
+from libcst.metadata import PositionProvider
+import polib
 
-__version__ = "3.4.2"
 
+# performance boost + support for Python 3.10 and 3.11 syntax
+os.environ["LIBCST_PARSER_TYPE"] = "native"
+
+__version__ = "4.0.0"
+
+CLASS_DECORATOR_NAMES = ("cog_i18n",)
+FUNCTION_DECORATOR_NAMES = ("command", "group")
 DEFAULT_KEYWORDS = ["_"]
 
 
-def is_literal_string(s: str) -> bool:
-    return s[0] in "'\"" or (s[0] in "rRuU" and s[1] in "'\"")
+class POTFileManager:
+    def __init__(self, options: argparse.Namespace) -> None:
+        self.options = options
+        self._potfiles: Dict[Path, polib.POFile] = {}
+        self.current_infile: Optional[Path] = None
+        self._current_outfile: Optional[Path] = None
+        self.current_potfile: Optional[polib.POFile] = None
 
-
-def safe_eval(s: str) -> Any:
-    # unwrap quotes, safely
-    return eval(s, {"__builtins__": {}}, {})
-
-
-class TokenEater:
-    def __init__(self, options: argparse.Namespace):
-        self.__options: argparse.Namespace = options
-        self.__state: Callable[[int, str, int], None] = self.__waiting
-        self.__data: List[Any] = []
-        self.__lineno: int = -1
-        self.__fresh_module: bool = True
-        self.__cur_infile: Optional[pathlib.Path] = None
-        self.__cur_outfile: Optional[pathlib.Path] = None
-        self.__potfiles: Dict[pathlib.Path, polib.POFile] = {}
-        self.__enclosure_count: int = 0
-
-    def __call__(
-        self,
-        ttype: int,
-        string: str,
-        start: Tuple[int, int],
-        end: Tuple[int, int],
-        line: int,
-    ) -> None:
-        self.__state(ttype, string, start[0])
-
-    @property
-    def __cur_potfile(self) -> polib.POFile:
-        return self.__potfiles.get(self.__cur_outfile)
-
-    def __waiting(self, ttype: int, string: str, lineno: int) -> None:
-        opts = self.__options
-        # Do docstring extractions, if enabled
-        if opts.docstrings:
-            # module docstring?
-            if self.__fresh_module:
-                if ttype == tokenize.STRING and is_literal_string(string):
-                    self.__add_entry(safe_eval(string), lineno, is_docstring=True)
-                    self.__fresh_module = False
-                    return
-                elif ttype not in (tokenize.COMMENT, tokenize.NL):
-                    self.__fresh_module = False
-            # class or method docstring?
-            elif ttype == tokenize.NAME and string in ("class", "def"):
-                self.__state = self.__suite_seen
-                return
-        # cog or command docstring?
-        if opts.cmd_docstrings:
-            if ttype == tokenize.OP and string == "@":
-                self.__state = self.__decorator_seen
-                return
-            elif ttype == tokenize.NAME and string == "class":
-                self.__state = self.__class_seen
-                return
-        if ttype == tokenize.NAME and string in opts.keywords:
-            self.__state = self.__keyword_seen
-            return
-        if ttype == tokenize.STRING:
-            maybe_fstring = ast.parse(string, mode="eval").body
-            if not isinstance(maybe_fstring, ast.JoinedStr):
-                return
-            for value in filter(
-                lambda node: isinstance(node, ast.FormattedValue), maybe_fstring.values
-            ):
-                for call in filter(
-                    lambda node: isinstance(node, ast.Call), ast.walk(value)
-                ):
-                    func = call.func
-                    if isinstance(func, ast.Name):
-                        func_name = func.id
-                    elif isinstance(func, ast.Attribute):
-                        func_name = func.attr
-                    else:
-                        continue
-
-                    if func_name not in opts.keywords:
-                        continue
-                    if len(call.args) != 1:
-                        print(
-                            "*** %(file)s:%(lineno)s: Seen unexpected amount of"
-                            " positional arguments in gettext call: %(source_segment)s"
-                            % {
-                                "source_segment": (
-                                    ast.get_source_segment(string, call) or string
-                                ),
-                                "file": self.__cur_infile,
-                                "lineno": lineno,
-                            },
-                            file=sys.stderr,
-                        )
-                        continue
-                    if call.keywords:
-                        print(
-                            "*** %(file)s:%(lineno)s: Seen unexpected keyword arguments"
-                            " in gettext call: %(source_segment)s"
-                            % {
-                                "source_segment": (
-                                    ast.get_source_segment(string, call) or string
-                                ),
-                                "file": self.__cur_infile,
-                                "lineno": lineno,
-                            },
-                            file=sys.stderr,
-                        )
-                        continue
-                    arg = call.args[0]
-                    if not isinstance(arg, ast.Constant):
-                        print(
-                            "*** %(file)s:%(lineno)s: Seen unexpected argument type"
-                            " in gettext call: %(source_segment)s"
-                            % {
-                                "source_segment": (
-                                    ast.get_source_segment(string, call) or string
-                                ),
-                                "file": self.__cur_infile,
-                                "lineno": lineno,
-                            },
-                            file=sys.stderr,
-                        )
-                        continue
-                    if isinstance(arg.value, str):
-                        self.__add_entry(arg.value, lineno)
-
-    # noinspection PyUnusedLocal
-    def __decorator_seen(self, ttype: int, string: str, lineno: int) -> None:
-        # Look for the @command(), @group() or @cog_i18n() decorators
-        if ttype == tokenize.NAME and string in ("command", "group", "cog_i18n"):
-            self.__state = self.__suite_seen
-        elif ttype == tokenize.NEWLINE:
-            self.__state = self.__waiting
-
-    # noinspection PyUnusedLocal
-    def __class_seen(self, ttype: int, string: str, lineno: int) -> None:
-        # Look for the `translator` subclass kwarg
-        if self.__enclosure_count == 1:
-            if ttype == tokenize.NAME and string == "translator":
-                self.__state = self.__suite_seen
-                return
-        if ttype == tokenize.OP:
-            if string == ":" and self.__enclosure_count == 0:
-                # we see a colon and we're not in an enclosure: end of def/class
-                self.__state = self.__waiting
-            elif string in "([{":
-                self.__enclosure_count += 1
-            elif string in ")]}":
-                self.__enclosure_count -= 1
-
-    # noinspection PyUnusedLocal
-    def __suite_seen(self, ttype: int, string: str, lineno: int) -> None:
-        if ttype == tokenize.OP:
-            if string == ":" and self.__enclosure_count == 0:
-                # we see a colon and we're not in an enclosure: end of def/class
-                self.__state = self.__suite_docstring
-            elif string in "([{":
-                self.__enclosure_count += 1
-            elif string in ")]}":
-                self.__enclosure_count -= 1
-
-    def __suite_docstring(self, ttype: int, string: str, lineno: int) -> None:
-        # ignore any intervening noise
-        if ttype == tokenize.STRING and is_literal_string(string):
-            self.__add_entry(safe_eval(string), lineno, is_docstring=True)
-            self.__state = self.__waiting
-        elif ttype not in (tokenize.NEWLINE, tokenize.INDENT, tokenize.COMMENT):
-            # there was no class docstring
-            self.__state = self.__waiting
-
-    def __keyword_seen(self, ttype: int, string: str, lineno: int) -> None:
-        if ttype == tokenize.OP and string == "(":
-            self.__data = []
-            self.__lineno = lineno
-            self.__state = self.__open_seen
-        else:
-            self.__state = self.__waiting
-
-    # noinspection PyUnusedLocal
-    def __open_seen(self, ttype: int, string: str, lineno: int) -> None:
-        if ttype == tokenize.OP and string == ")":
-            # We've seen the last of the translatable strings.  Record the
-            # line number of the first line of the strings and update the list
-            # of messages seen.  Reset state for the next batch.  If there
-            # were no strings inside _(), then just ignore this entry.
-            if self.__data:
-                self.__add_entry("".join(self.__data))
-            self.__state = self.__waiting
-        elif ttype == tokenize.STRING and is_literal_string(string):
-            self.__data.append(safe_eval(string))
-        elif ttype not in [
-            tokenize.COMMENT,
-            tokenize.INDENT,
-            tokenize.DEDENT,
-            tokenize.NEWLINE,
-            tokenize.NL,
-        ]:
-            # warn if we see anything else than STRING or whitespace
-            print(
-                '*** %(file)s:%(lineno)s: Seen unexpected token "%(token)s"'
-                % {"token": string, "file": self.__cur_infile, "lineno": self.__lineno},
-                file=sys.stderr,
-            )
-            self.__state = self.__waiting
-
-    def __add_entry(
-        self, msg: str, lineno: Optional[int] = None, is_docstring: bool = False
-    ) -> None:
-        if lineno is None:
-            lineno: int = self.__lineno
-
-        entry = next(
-            (entry for entry in self.__cur_potfile if entry.msgid == msg), None
-        )
-        occurrence = (str(self.__cur_infile), lineno)
-        if is_docstring:
-            flags = ["docstring"]
-        else:
-            flags = []
-        if entry is None:
-            self.__cur_potfile.append(
-                polib.POEntry(
-                    msgid=msg,
-                    occurrences=[occurrence],
-                    flags=flags,
-                )
-            )
-        else:
-            entry.occurrences.append(occurrence)
-            entry.occurrences.sort()
-
-    def set_cur_file(self, path: pathlib.Path) -> None:
-        opts = self.__options
-        self.__cur_infile = path
+    def set_current_file(self, path: Path) -> None:
+        opts = self.options
+        self.current_infile = path
         if opts.relative_to_cwd:
-            cur_dir = pathlib.Path()
+            current_dir = Path()
         else:
-            cur_dir = path.parent
-        self.__fresh_module = True
-        self.__cur_outfile = cur_dir / opts.output_dir / opts.output_filename
-        if self.__cur_outfile not in self.__potfiles:
-            self.__potfiles[self.__cur_outfile] = cur_potfile = polib.POFile()
-            cur_potfile.metadata = {
+            current_dir = path.parent
+        self._current_outfile = current_dir / opts.output_dir / opts.output_filename
+        if self._current_outfile not in self._potfiles:
+            self.current_potfile = polib.POFile()
+            self._potfiles[self._current_outfile] = self.current_potfile
+            self.current_potfile.metadata = {
                 "Project-Id-Version": "PACKAGE VERSION",
                 "POT-Creation-Date": time.strftime("%Y-%m-%d %H:%M%z"),
                 "PO-Revision-Date": "YEAR-MO-DA HO:MI+ZONE",
@@ -294,12 +52,193 @@ class TokenEater:
             }
 
     def write(self) -> None:
-        for outfile_path, potfile in self.__potfiles.items():
-            if not potfile and self.__options.omit_empty:
+        for outfile_path, potfile in self._potfiles.items():
+            if not potfile and self.options.omit_empty:
                 continue
             outfile_path.parent.mkdir(parents=True, exist_ok=True)
             potfile.sort(key=lambda e: e.occurrences[0])
             potfile.save(str(outfile_path))
+
+    def add_entry(
+        self,
+        msgid: str,
+        *,
+        lineno: int,
+        is_docstring: bool = False,
+    ) -> None:
+        if self.current_potfile is None:
+            raise RuntimeError("There's no pot file set.")
+
+        occurrence = (str(self.current_infile), lineno)
+
+        if not msgid:
+            print(
+                f"{occurrence[0]}:{occurrence[1]}: warning: Empty msgid. Empty msgid is reserved"
+                ' - gettext("") call returns po file metadata, not the empty string.',
+                file=sys.stderr,
+            )
+            return
+
+        entry = self.current_potfile.find(msgid)
+        if is_docstring:
+            flags = ["docstring"]
+        else:
+            flags = []
+        if entry is None:
+            self.current_potfile.append(
+                polib.POEntry(
+                    msgid=msgid,
+                    occurrences=[occurrence],
+                    flags=flags,
+                )
+            )
+        else:
+            if not entry.flags:
+                entry.flags = flags
+            entry.occurrences.append(occurrence)
+            entry.occurrences.sort()
+
+
+class MessageExtractor(cst.CSTVisitor):
+    METADATA_DEPENDENCIES = (PositionProvider,)
+
+    module: cst.Module
+
+    def __init__(self, potfile_manager: POTFileManager) -> None:
+        self.potfile_manager = potfile_manager
+        self.options = potfile_manager.options
+
+    def get_literal_string(
+        self, node: cst.BaseExpression
+    ) -> Union[cst.SimpleString, cst.ConcatenatedString, None]:
+        if not isinstance(node, (cst.SimpleString, cst.ConcatenatedString)):
+            return None
+        # concatenated string may be None if some part of it is an f-string
+        if node.evaluated_value is None:
+            return None
+        return node
+
+    def get_docstring_node(
+        self, node: Union[cst.Module, cst.ClassDef, cst.FunctionDef]
+    ) -> Union[cst.SimpleString, cst.ConcatenatedString, None]:
+        body = node.body
+        expr: cst.BaseSuite | cst.BaseStatement | cst.BaseSmallStatement
+        if isinstance(body, Sequence):
+            if not body:
+                return None
+            expr = body[0]
+        else:
+            expr = body
+
+        while isinstance(expr, (cst.BaseSuite, cst.SimpleStatementLine)):
+            if not expr.body:
+                return None
+            expr = expr.body[0]
+        if not isinstance(expr, cst.Expr):
+            return None
+
+        return self.get_literal_string(expr.value)
+
+    def print_error(self, starting_node: cst.CSTNode, message: str) -> None:
+        file = self.potfile_manager.current_infile
+        lineno = self.get_metadata(PositionProvider, starting_node).start.line
+        code = self.module.code_for_node(starting_node)
+        print(f"*** {file}:{lineno}: {message}:\n{code}", file=sys.stderr)
+
+    def visit_Call(self, node: cst.Call) -> None:
+        if type(node.func) is cst.Name:
+            if node.func.value not in self.options.keywords:
+                return
+        elif type(node.func) is cst.Attribute:
+            if node.func.attr.value not in self.options.keywords:
+                return
+        else:
+            return
+
+        if len(node.args) != 1:
+            self.print_error(
+                node, "Seen unexpected amount of positional arguments in gettext call"
+            )
+            return
+        arg = node.args[0]
+        # argument needs to be positional
+        if arg.keyword is not None:
+            self.print_error(node, "Seen unexpected keyword arguments in gettext call")
+            return
+        if arg.star:
+            self.print_error(
+                node, "Seen unexpected variadic positional argument (*args) in gettext call"
+            )
+            return
+
+        string_node = self.get_literal_string(arg.value)
+        if string_node is not None:
+            self.add_entry(string_node, starting_node=node)
+        else:
+            self.print_error(node, "Seen unexpected argument type in gettext call")
+
+    def visit_Module(self, node: cst.Module) -> None:
+        self.module = node
+        if not self.options.docstrings:
+            return
+
+        docstring_node = self.get_docstring_node(node)
+        if docstring_node is not None:
+            self.add_entry(docstring_node, is_docstring=True)
+
+    def visit_ClassDef(self, node: cst.ClassDef) -> None:
+        self.handle_class_or_function(node)
+
+    def visit_FunctionDef(self, node: cst.FunctionDef) -> None:
+        self.handle_class_or_function(node)
+
+    def handle_class_or_function(self, node: Union[cst.ClassDef, cst.FunctionDef]) -> None:
+        if self.options.docstrings:
+            pass
+        elif self.options.cmd_docstrings:
+            if isinstance(node, cst.ClassDef):
+                decorator_names = CLASS_DECORATOR_NAMES
+            else:
+                decorator_names = FUNCTION_DECORATOR_NAMES
+
+            for decorator in node.decorators:
+                # @deco_name is not valid, it needs to be a call: @deco_name(...)
+                deco = decorator.decorator
+                if type(deco) is not cst.Call:
+                    continue
+                if type(deco.func) is cst.Name:
+                    if deco.func.value in decorator_names:
+                        break
+                elif type(deco.func) is cst.Attribute:
+                    # in `a.b.c()`, only `c` is checked
+                    if deco.func.attr.value in decorator_names:
+                        break
+            else:
+                return
+        else:
+            return
+
+        docstring_node = self.get_docstring_node(node)
+        if docstring_node is not None:
+            self.add_entry(docstring_node, is_docstring=True)
+
+    def add_entry(
+        self,
+        node: Union[cst.SimpleString, cst.ConcatenatedString],
+        *,
+        starting_node: Optional[cst.CSTNode] = None,
+        is_docstring: bool = False,
+    ) -> None:
+        evaluated_value = node.evaluated_value
+        if evaluated_value is None:
+            return
+        if starting_node is None:
+            starting_node = node
+        self.potfile_manager.add_entry(
+            evaluated_value,
+            lineno=self.get_metadata(PositionProvider, starting_node).start.line,
+            is_docstring=is_docstring,
+        )
 
 
 def _parse_args(args: List[str]) -> argparse.Namespace:
@@ -312,7 +251,7 @@ def _parse_args(args: List[str]) -> argparse.Namespace:
         "infiles",
         nargs="*",
         metavar="INFILE",
-        type=pathlib.Path,
+        type=Path,
         help=(
             "An input file or directory. When a directory is specified, strings "
             "will be extracted from all `.py` submodules. Can be multiple."
@@ -364,7 +303,7 @@ def _parse_args(args: List[str]) -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         "-O",
-        type=pathlib.Path,
+        type=Path,
         metavar="DIR",
         default="locales",
         help=(
@@ -390,9 +329,7 @@ def _parse_args(args: List[str]) -> argparse.Namespace:
         "--recursive",
         "-r",
         action="store_true",
-        help=(
-            "For directories passed as input, recurse through subdirectories as well."
-        ),
+        help=("For directories passed as input, recurse through subdirectories as well."),
     )
     parser.add_argument(
         "--relative-to-cwd",
@@ -439,9 +376,8 @@ def main(args: Optional[List[str]] = None) -> int:
         print("You must include at least one input file or directory.")
         return 1
 
-    all_infiles: List[pathlib.Path] = []
-    # noinspection PyUnusedLocal
-    path: pathlib.Path
+    all_infiles: List[Path] = []
+    path: Path
     for path in options.infiles:
         if path.is_dir():
             if options.recursive:
@@ -454,29 +390,27 @@ def main(args: Optional[List[str]] = None) -> int:
     # filter excluded files
     if options.excluded_files:
         for glob in options.excluded_files:
-            excluded_files = set(pathlib.Path().glob(glob))
+            excluded_files = set(Path().glob(glob))
             all_infiles = [f for f in all_infiles if f not in excluded_files]
 
     # slurp through all the files
-    eater = TokenEater(options)
+    potfile_manager = POTFileManager(options)
     for path in all_infiles:
         if options.verbose:
-            print("Working on %s" % path)
+            print(f"Working on {path}")
         with path.open("rb") as fp:
-            eater.set_cur_file(path)
+            potfile_manager.set_current_file(path)
             try:
-                tokens = tokenize.tokenize(fp.readline)
-                for _token in tokens:
-                    eater(*_token)
-            except tokenize.TokenError as e:
-                print(
-                    "%s: %s, line %d, column %d"
-                    % (e.args[0], path, e.args[1][0], e.args[1][1]),
-                    file=sys.stderr,
-                )
+                module = cst.parse_module(fp.read())
+            except cst.ParserSyntaxError as exc:
+                print(f"{path}:", str(exc), file=sys.stderr)
+            else:
+                wrapper = cst.MetadataWrapper(module, unsafe_skip_copy=True)
+                visitor = MessageExtractor(potfile_manager)
+                wrapper.visit(visitor)
 
     # write the output
-    eater.write()
+    potfile_manager.write()
     return 0
 
 
