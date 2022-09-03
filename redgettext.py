@@ -6,7 +6,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Dict, Iterable, List, NamedTuple, Optional, Union
 
 import polib
 
@@ -15,7 +15,166 @@ __version__ = "4.0.0"
 
 CLASS_DECORATOR_NAMES = ("cog_i18n",)
 FUNCTION_DECORATOR_NAMES = ("command", "group")
-DEFAULT_KEYWORDS = ["_"]
+DEFAULT_KEYWORD_SPECS = (
+    "_:1,1t",
+    "gettext_noop:1,1t",
+    # These should be included in default keywords once support gets added to Red.
+    #
+    # "ngettext:1,2,3t",
+    # "pgettext:1c,2,2t",
+    # "npgettext:1c,2,3,4t",
+)
+
+
+def parse_int(text: str) -> int:
+    try:
+        return int(text)
+    except ValueError:
+        raise ValueError(f"{text!r} is not a valid integer.") from None
+
+
+class KeywordInfo(NamedTuple):
+    keyword: str
+    arg_singular: int = 0
+    arg_plural: Optional[int] = None
+    arg_context: Optional[int] = None
+    total_arg_count: Optional[int] = None
+    comment: str = ""
+
+    def __eq__(self, other: KeywordInfo) -> int:
+        return self.keyword == other.keyword and self.total_arg_count == other.total_arg_count
+
+    def __hash__(self) -> int:
+        return hash((self.keyword, self.total_arg_count))
+
+    @property
+    def max_arg_number(self):
+        return max(self.arg_singular, self.arg_plural or 0, self.arg_context or 0)
+
+    @classmethod
+    def from_spec(cls, keyword_spec: str) -> KeywordInfo:
+        keyword, _, arg_info = keyword_spec.partition(":")
+        if not arg_info:
+            return cls(keyword)
+
+        comments = []
+        arg_singular = None
+        arg_plural = None
+        arg_context = None
+        total_arg_count = None
+
+        pos = len(arg_info)
+        while (pos := pos - 1) >= 0:
+            char = arg_info[pos]
+            if char == '"':
+                try:
+                    start_pos = arg_info.rindex('"', None, pos) + 1
+                except ValueError:
+                    raise ValueError("Couldn't find starting quote of a comment string.") from None
+                comments.append(arg_info[start_pos:pos])
+                pos = start_pos - 2
+                if pos >= 0 and arg_info[pos] != ",":
+                    raise ValueError("Expected a comma before the starting quote.")
+                continue
+
+            # position of the first digit of the number
+            start_pos = arg_info.rfind(",", None, pos) + 1
+
+            if arg_info[pos] == "t":
+                if total_arg_count is not None:
+                    raise ValueError("Total argument count can only be specified once.")
+                total_arg_count = parse_int(arg_info[start_pos:pos])
+            elif arg_info[pos] == "c":
+                if arg_context is not None:
+                    raise ValueError("There can only be one context argument specified.")
+                arg_context = parse_int(arg_info[start_pos:pos]) - 1
+            else:
+                # increment `pos` to properly include last digit of the number
+                pos += 1
+                if arg_singular is None:
+                    arg_singular = parse_int(arg_info[start_pos:pos]) - 1
+                elif arg_plural is None:
+                    arg_plural = arg_singular
+                    arg_singular = parse_int(arg_info[start_pos:pos]) - 1
+                else:
+                    raise ValueError("There cannot be more than two normal arguments specified.")
+
+            pos = start_pos - 1
+
+        if arg_singular is None:
+            raise ValueError(
+                "A singular form argument needs to be specified"
+                " when providing an argument specification after the colon."
+            )
+
+        args = [arg_singular]
+        if arg_plural is not None:
+            args.append(arg_plural)
+            if arg_plural < 0:
+                raise ValueError(
+                    "The specified argument number for plural form argument is invalid."
+                    " Argument numbers start from 1."
+                )
+        if arg_singular < 0:
+            raise ValueError(
+                "The specified argument number for singular form argument is invalid."
+                " Argument numbers start from 1."
+            )
+        if arg_context is not None:
+            args.append(arg_context)
+            if arg_context < 0:
+                raise ValueError(
+                    "The specified argument number for context argument is invalid."
+                    " Argument numbers start from 1."
+                )
+
+        if len(args) != len(set(args)):
+            raise ValueError(
+                "The same argument number cannot be used for multiple argument types."
+            )
+
+        ret = cls(
+            keyword=keyword,
+            arg_singular=arg_singular,
+            arg_plural=arg_plural,
+            arg_context=arg_context,
+            total_arg_count=total_arg_count,
+            comment="\n".join(reversed(comments)),
+        )
+        if total_arg_count is not None:
+            if total_arg_count < 1:
+                raise ValueError("The total argument count cannot be lower than 1.")
+            if total_arg_count <= ret.max_arg_number:
+                raise ValueError(
+                    "The total argument count cannot be lower than"
+                    " any of the specified argument numbers."
+                )
+
+        return ret
+
+
+def parse_keyword_specs(keyword_specs: Iterable[str]) -> Dict[str, List[KeywordInfo]]:
+    parsed = {}
+    for keyword_spec in keyword_specs:
+        keyword_info = KeywordInfo.from_spec(keyword_spec)
+        keywords = parsed.setdefault(keyword_info.keyword, set())
+        if keyword_info in keywords:
+            keyword = keyword_info.keyword
+            total_arg_count = keyword_info.total_arg_count
+            if keyword_info.total_arg_count is None:
+                raise ValueError(
+                    f"A keyword {keyword!r} with no total argument count"
+                    " has been specified more than once."
+                )
+            raise ValueError(
+                f"A keyword {keyword!r} with a total argument count {total_arg_count}"
+                " has been specified more than once."
+            )
+        keywords.add(keyword_info)
+    return {
+        keyword: sorted(keywords, key=lambda ki: (ki.total_arg_count is None, ki.total_arg_count))
+        for keyword, keywords in parsed.items()
+    }
 
 
 class Options:
@@ -23,7 +182,7 @@ class Options:
         self,
         *,
         omit_empty: bool = False,
-        keywords: List[str] = DEFAULT_KEYWORDS,
+        keyword_specs: Iterable[str] = DEFAULT_KEYWORD_SPECS,
         comment_tag: str = "Translators: ",
         docstrings: bool = False,
         cmd_docstrings: bool = False,
@@ -32,7 +191,7 @@ class Options:
         output_filename: str = "messages.pot",
     ) -> None:
         self.omit_empty = omit_empty
-        self.keywords = keywords
+        self.keywords = parse_keyword_specs(keyword_specs)
         self.comment_tag = comment_tag.lstrip()
         self.docstrings = docstrings
         self.cmd_docstrings = cmd_docstrings
@@ -42,9 +201,11 @@ class Options:
 
     @classmethod
     def from_args(cls, namespace: argparse.Namespace) -> Options:
+        if namespace.include_default_keywords:
+            namespace.keyword_specs.extend(DEFAULT_KEYWORD_SPECS)
         return cls(
             omit_empty=namespace.omit_empty,
-            keywords=namespace.keywords,
+            keyword_specs=namespace.keyword_specs,
             docstrings=namespace.docstrings,
             cmd_docstrings=namespace.cmd_docstrings,
         )
@@ -96,6 +257,8 @@ class POTFileManager:
     def add_entry(
         self,
         msgid: str,
+        msgid_plural: Optional[str] = None,
+        msgctxt: Optional[str] = None,
         *,
         comment: Optional[str] = None,
         lineno: int,
@@ -114,9 +277,11 @@ class POTFileManager:
             )
             return
 
+        msgid_plural = msgid_plural or ""
+        msgctxt = msgctxt or None
         comment = comment or ""
 
-        entry = self.current_potfile.find(msgid)
+        entry = self.current_potfile.find(msgid, msgctxt=msgctxt)
         if is_docstring:
             flags = ["docstring"]
         else:
@@ -125,12 +290,28 @@ class POTFileManager:
             self.current_potfile.append(
                 polib.POEntry(
                     msgid=msgid,
+                    msgid_plural=msgid_plural,
+                    msgctxt=msgctxt,
                     comment=comment,
                     occurrences=[occurrence],
                     flags=flags,
                 )
             )
         else:
+            if bool(entry.msgid_plural) != bool(msgid_plural):
+                if entry.msgid_plural:
+                    singular_occurence = occurrence
+                    plural_occurence = entry.occurrences[0]
+                else:
+                    singular_occurence = entry.occurrences[0]
+                    plural_occurence = occurrence
+                    entry.msgid_plural = msgid_plural
+                print(
+                    f"warning: msgid {entry.msgid} is used both with and without plural form:\n"
+                    f"  - Example occurrence without plural form: {singular_occurence}\n"
+                    f"  - Example occurrence with plural form: {plural_occurence}",
+                    file=sys.stderr,
+                )
             if not entry.comment:
                 entry.comment = comment
             elif comment:
@@ -208,39 +389,77 @@ class MessageExtractor(ast.NodeVisitor):
 
     def visit_Call(self, node: ast.Call) -> None:
         if type(node.func) is ast.Name:
-            if node.func.id not in self.options.keywords:
+            keywords = self.options.keywords.get(node.func.id)
+            if keywords is None:
                 return self.generic_visit(node)
         elif type(node.func) is ast.Attribute:
-            if node.func.attr not in self.options.keywords:
+            keywords = self.options.keywords.get(node.func.attr)
+            if keywords is None:
                 return self.generic_visit(node)
         else:
-            return self.generic_visit(node)
-
-        if len(node.args) != 1:
-            self.print_error(
-                node, "Seen unexpected amount of positional arguments in gettext call"
-            )
             return self.generic_visit(node)
 
         if node.keywords:
             self.print_error(node, "Seen unexpected keyword arguments in gettext call")
             return self.generic_visit(node)
 
-        arg = node.args[0]
-        string_node = self.get_literal_string(arg)
-        if string_node is not None:
+        try:
+            keyword_info = self.get_keyword_info(keywords, node)
+        except ValueError:
+            self.print_error(
+                node, "The gettext call doesn't match any set argument specification."
+            )
+            return self.generic_visit(node)
+
+        try:
+            arg_singular = self.get_literal_string_from_call(node, keyword_info.arg_singular)
+            arg_plural = self.get_literal_string_from_call(node, keyword_info.arg_plural)
+            arg_context = self.get_literal_string_from_call(node, keyword_info.arg_context)
+        except ValueError as exc:
+            self.print_error(node, str(exc))
+        else:
             comments = []
-            for commentable_node in (node, string_node):
+            for commentable_node in (node, arg_singular, arg_plural, arg_context):
                 if commentable_node is not None:
                     comment = self.translator_comments.pop(commentable_node.lineno, None)
                     if comment is not None:
                         comments.append(comment)
 
-            self.add_entry(string_node, comment="\n".join(comments), starting_node=node)
-        else:
-            self.print_error(node, "Seen unexpected argument type in gettext call")
+            if keyword_info.comment:
+                comments.append(keyword_info.comment)
+
+            self.add_entry(
+                arg_singular,
+                arg_plural,
+                arg_context,
+                comment="\n".join(comments),
+                starting_node=node,
+            )
 
         return self.generic_visit(node)
+
+    def get_keyword_info(self, keywords: List[KeywordInfo], node: ast.Call) -> KeywordInfo:
+        for keyword_info in keywords:
+            total_arg_count = keyword_info.total_arg_count
+            if total_arg_count is not None:
+                if len(node.args) != total_arg_count:
+                    continue
+            elif len(node.args) < keyword_info.max_arg_number:
+                continue
+            return keyword_info
+        raise ValueError("Can't find a matching argument specification.")
+
+    def get_literal_string_from_call(
+        self, node: ast.Call, arg_number: Optional[int]
+    ) -> ast.Constant:
+        if arg_number is None:
+            return None
+        arg = node.args[arg_number]
+        string_node = self.get_literal_string(arg)
+        if string_node is not None:
+            return string_node
+        else:
+            raise ValueError(f"Seen unexpected type for argument {arg_number+1} in gettext call")
 
     def visit_Module(self, node: ast.Module) -> None:
         if not self.options.docstrings:
@@ -298,6 +517,8 @@ class MessageExtractor(ast.NodeVisitor):
     def add_entry(
         self,
         node: ast.Constant,
+        node_plural: Optional[ast.Constant] = None,
+        node_context: Optional[ast.Constant] = None,
         *,
         comment: str = "",
         starting_node: Optional[ast.AST] = None,
@@ -307,6 +528,8 @@ class MessageExtractor(ast.NodeVisitor):
             starting_node = node
         self.potfile_manager.add_entry(
             node.value,
+            node_plural and node_plural.value,
+            node_context and node_context.value,
             comment=comment,
             lineno=starting_node.lineno,
             is_docstring=is_docstring,
@@ -438,7 +661,8 @@ def main(args: Optional[List[str]] = None) -> int:
     args = _parse_args(args)
 
     # TODO: Make these an option
-    args.keywords = DEFAULT_KEYWORDS
+    args.keyword_specs = []
+    args.include_default_keywords = True
 
     if args.version:
         print(f"redgettext {__version__}")
@@ -465,9 +689,14 @@ def main(args: Optional[List[str]] = None) -> int:
             excluded_files = set(Path().glob(glob))
             all_infiles = [f for f in all_infiles if f not in excluded_files]
 
-    # slurp through all the files
-    options = Options.from_args(args)
+    try:
+        options = Options.from_args(args)
+    except ValueError as exc:
+        print(str(exc))
+        return 1
     potfile_manager = POTFileManager(options)
+
+    # slurp through all the files
     for path in all_infiles:
         if args.verbose:
             print(f"Working on {path}")
