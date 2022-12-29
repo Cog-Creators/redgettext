@@ -29,11 +29,16 @@ keywords = [
     "redbot",
     "red-discordbot",
 ]
-requires-python = ">=3.6"
+requires-python = ">=3.8"
 dependencies = [
     "polib",
 ]
 dynamic = ["version"]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+]
 
 [project.scripts]
 redgettext = "redgettext:main"
@@ -49,5 +54,8 @@ redgettext = "redgettext:main"
 version = {attr = "redgettext.__version__"}
 
 [tool.black]
+line-length = 99
 target-version = ['py38']
-include = '\.py$'
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
