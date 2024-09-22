@@ -3,7 +3,7 @@ import polib
 from redgettext import Options
 from tests.utils import FILENAME, get_extractor, get_test_potfile
 
-OPTIONS = Options()
+OPTIONS = Options(keyword_specs=("_:1", 'ngettext:1,2,"comment from keyword spec"'))
 SOURCE = """\
 # Translators: comment A1
 _('A') + _('B')
@@ -41,6 +41,12 @@ _('C')
 # as long as there's no code between
 
 _('D')
+
+# Translators: handles comments from keyspec too
+# no matter if there's a translator comment in code or not
+ngettext('E', 'F', 2)
+
+ngettext('G', 'H', 2)
 """
 
 
@@ -85,6 +91,22 @@ def test_comments() -> None:
                 "handles whitespace between\n"
                 "as long as there's no code between"
             ),
+        ),
+        polib.POEntry(
+            msgid="E",
+            msgid_plural="F",
+            occurrences=[(FILENAME, 40)],
+            comment=(
+                "Translators: handles comments from keyspec too\n"
+                "no matter if there's a translator comment in code or not\n"
+                "comment from keyword spec"
+            ),
+        ),
+        polib.POEntry(
+            msgid="G",
+            msgid_plural="H",
+            occurrences=[(FILENAME, 42)],
+            comment="comment from keyword spec",
         ),
     )
     assert str(extractor.potfile_manager.current_potfile) == str(expected)
